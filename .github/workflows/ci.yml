@@ -28,7 +28,18 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test ./... -count=1
+        run: |
+          set -o pipefail
+          go test ./... -count=1 2>&1 | tee /tmp/dirspace-test.log
+      - name: Test failure details
+        if: failure()
+        run: |
+          {
+            echo '### go test output'
+            echo '```'
+            tail -200 /tmp/dirspace-test.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Race test
         run: go test -race ./... -count=1
       - name: Build Linux amd64
