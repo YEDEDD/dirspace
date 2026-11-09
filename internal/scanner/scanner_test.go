@@ -13,6 +13,7 @@ import (
 
 	"github.com/YEDEDD/dirspace/internal/config"
 	"github.com/YEDEDD/dirspace/internal/model"
+	"github.com/YEDEDD/dirspace/internal/platform"
 	"github.com/YEDEDD/dirspace/internal/storage"
 )
 
@@ -130,8 +131,18 @@ func TestScanAggregatesAndHardlinks(t *testing.T) {
 		t.Fatal("negative size")
 	}
 	total := alpha.AllocBytes + beta.AllocBytes + gamma.AllocBytes
-	if root.TotalAlloc != total {
-		t.Fatalf("root total %d != sum %d", root.TotalAlloc, total)
+	// Each directory contributes its own directory block, including the scan
+	// root. On APFS the root block is usually 0; on ext4/XFS it is 4096 bytes.
+	rootInfo, statErr := os.Stat(f.root)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	rootMeta, exact := platform.Stat(rootInfo)
+	if !exact {
+		t.Fatal("root metadata is not exact")
+	}
+	if want := total + rootMeta.Allocated; root.TotalAlloc != want {
+		t.Fatalf("root total %d != top dirs %d + root block %d", root.TotalAlloc, total, rootMeta.Allocated)
 	}
 	if root.TotalAlloc < 1<<20 || root.TotalAlloc > (1<<20)+200<<10 {
 		t.Fatalf("unexpected root total: %d", root.TotalAlloc)
