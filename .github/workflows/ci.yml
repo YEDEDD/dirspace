@@ -40,9 +40,13 @@ jobs:
             tail -200 /tmp/dirspace-test.log || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          message="$(grep -E '^(--- FAIL|FAIL|panic:|[^ ]+\.go:[0-9]+:)' /tmp/dirspace-test.log | head -20 | tr '\n' ' ' || true)"
+          message="$(grep -E '^(--- FAIL|FAIL|panic:|[^ ]+\.go:[0-9]+:)' /tmp/dirspace-test.log | head -40 | tr '\n' ' ' || true)"
           if [ -n "$message" ]; then
             echo "::error title=Go test failure::$message"
+          fi
+          detail="$(tail -60 /tmp/dirspace-test.log | tr '\n' ' ' || true)"
+          if [ -n "$detail" ]; then
+            echo "::error title=Go test tail::$detail"
           fi
       - name: Race test
         run: go test -race ./... -count=1
