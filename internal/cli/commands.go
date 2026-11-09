@@ -16,13 +16,14 @@ import (
 	"github.com/YEDEDD/dirspace/internal/config"
 	"github.com/YEDEDD/dirspace/internal/logger"
 	"github.com/YEDEDD/dirspace/internal/model"
+	"github.com/YEDEDD/dirspace/internal/mountinfo"
 	"github.com/YEDEDD/dirspace/internal/platform"
 	"github.com/YEDEDD/dirspace/internal/service"
 	"github.com/YEDEDD/dirspace/internal/storage"
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.0.0"
+var Version = "1.1.0"
 
 const (
 	exitOK      = 0
@@ -68,6 +69,14 @@ func parseCommand(positional []string) (command, error) {
 		return command{name: "help", args: rest}, nil
 	case "version":
 		return command{name: "version"}, nil
+	case "config":
+		if len(rest) == 0 {
+			return command{name: "config", args: []string{"explain"}}, nil
+		}
+		if len(rest) == 1 && rest[0] == "explain" {
+			return command{name: "config", args: rest}, nil
+		}
+		return command{}, &usageError{"config 只接受 explain"}
 	default:
 		return command{}, &usageError{fmt.Sprintf("未知命令: %s", name)}
 	}
@@ -199,6 +208,20 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 		return exitRuntime
 	}
 
+	// config explain is read-only and must work even when the database is
+	// missing or temporarily locked.
+	if cmd.name == "config" {
+		if opts.json {
+			if err := writeJSON(stdout, buildConfigJSON(cfg)); err != nil {
+				fmt.Fprintf(stderr, "输出 JSON 失败: %v\n", err)
+				return exitRuntime
+			}
+		} else {
+			printConfig(stdout, cfg)
+		}
+		return exitOK
+	}
+
 	defaultPath := cfg.Scan.RootPath
 	queryPath := opts.path
 	if queryPath == "" {
@@ -270,7 +293,7 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 		if opts.full {
 			scanOpts.Mode = model.ModeFull
 		}
-		fmt.Fprintf(stderr, "开始扫描 %s（并发 %d，元数据上限 %d QPS）...\n",
+		fmt.Fprintf(stderr, "开始扫描 %s（并发 %s，元数据上限 %d QPS）...\n",
 			queryPath, cfg.Performance.Concurrency, cfg.Performance.MaxMetadataQPS)
 		summary, err := svc.Scan(ctx, queryPath, scanOpts)
 		if summary != nil {
@@ -450,9 +473,90 @@ func setLowPriority(cfg *config.Config, log interface {
 	}
 	// Bound Go's runnable threads as an additional guard. systemd CPUQuota is
 	// still the hard limit.
-	if cfg.Performance.Concurrency < runtime.NumCPU() {
-		runtime.GOMAXPROCS(cfg.Performance.Concurrency)
+	if cfg.Performance.Concurrency.Limit() < runtime.NumCPU() {
+		runtime.GOMAXPROCS(cfg.Performance.Concurrency.Limit())
 	}
+}
+
+func buildConfigJSON(cfg *config.Config) map[string]any {
+	startQPS := cfg.Performance.MaxMetadataQPS
+	if cfg.Performance.AdaptiveThrottle && startQPS >= 10 {
+		startQPS /= 3
+		if startQPS < cfg.Performance.MinMetadataQPS {
+			startQPS = cfg.Performance.MinMetadataQPS
+		}
+	}
+	return map[string]any{
+		"source":               cfg.Source,
+		"profile":              cfg.Profile,
+		"root_path":            cfg.Scan.RootPath,
+		"database_path":        cfg.Database.Path,
+		"interval":             cfg.Scan.Interval.Duration.String(),
+		"retention_days":       cfg.Database.RetentionDays,
+		"concurrency":          cfg.Performance.Concurrency.String(),
+		"concurrency_auto":     cfg.Performance.Concurrency.Auto,
+		"concurrency_max":      cfg.Performance.Concurrency.Limit(),
+		"max_metadata_qps":     cfg.Performance.MaxMetadataQPS,
+		"start_metadata_qps":   startQPS,
+		"min_metadata_qps":     cfg.Performance.MinMetadataQPS,
+		"max_cpu_percent":      cfg.Performance.MaxCPUPercent,
+		"memory_limit":         cfg.Performance.MemoryLimit.Bytes,
+		"max_host_cpu_percent": cfg.Performance.MaxHostCPUPercent,
+		"max_load1":            cfg.Performance.MaxLoad1,
+		"nfs_slow_latency":     cfg.Performance.NFSSlowLatency.Duration.String(),
+		"nfs_pause_latency":    cfg.Performance.NFSPauseLatency.Duration.String(),
+		"mount_type":           mountinfo.FSType(cfg.Scan.RootPath),
+		"mount_server":         mountinfo.Server(cfg.Scan.RootPath),
+	}
+}
+
+func printConfig(w io.Writer, cfg *config.Config) {
+	source := cfg.Source
+	if source == "" {
+		source = "内置默认值"
+	}
+	fmt.Fprintf(w, "配置来源：%s\n", source)
+	fmt.Fprintf(w, "profile：%s\n", cfg.Profile)
+	fmt.Fprintf(w, "扫描根：%s\n", cfg.Scan.RootPath)
+	fmt.Fprintf(w, "数据库：%s\n", cfg.Database.Path)
+	fmt.Fprintf(w, "刷新间隔：%s（保留 %d 天历史）\n", formatInterval(cfg.Scan.Interval.Duration), cfg.Database.RetentionDays)
+	fmt.Fprintf(w, "并发：%s（实际 worker 取一级目录数与上限的较小值）\n", cfg.Performance.Concurrency)
+	fmt.Fprintf(w, "QPS：%d（自适应，起步约 %d）\n", cfg.Performance.MaxMetadataQPS, startQPS(cfg))
+	fmt.Fprintf(w, "CPU：%d%%；内存：%s\n", cfg.Performance.MaxCPUPercent, config.FormatBytes(cfg.Performance.MemoryLimit.Bytes))
+	fmt.Fprintf(w, "主机保护：CPU %g%%，Load1 %g（0 表示关闭）\n",
+		cfg.Performance.MaxHostCPUPercent, cfg.Performance.MaxLoad1)
+	fmt.Fprintf(w, "NFS 延迟：慢 %s，暂停 %s\n",
+		cfg.Performance.NFSSlowLatency.Duration, cfg.Performance.NFSPauseLatency.Duration)
+	mountType := mountinfo.FSType(cfg.Scan.RootPath)
+	if mountType == "" {
+		mountType = "未知（根路径未挂载或无 mountinfo）"
+	}
+	fmt.Fprintf(w, "挂载类型：%s", mountType)
+	if server := mountinfo.Server(cfg.Scan.RootPath); server != "" {
+		fmt.Fprintf(w, "，服务端：%s", server)
+	}
+	fmt.Fprintln(w)
+}
+
+func formatInterval(d time.Duration) string {
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", int64(d/time.Hour))
+	}
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int64(d/time.Minute))
+	}
+	return d.String()
+}
+
+func startQPS(cfg *config.Config) int {
+	qps := cfg.Performance.MaxMetadataQPS
+	if cfg.Performance.AdaptiveThrottle && qps >= 10 {
+		qps /= 3
+		if qps < cfg.Performance.MinMetadataQPS {
+			qps = cfg.Performance.MinMetadataQPS
+		}
+	}
+	return qps
 }
 
 func printHelp(w io.Writer) {
@@ -466,6 +570,7 @@ func printHelp(w io.Writer) {
   top <N>             显示空间排名前 N 个一级目录（默认 10）
   list                显示全部一级目录
   status              显示缓存、任务、进度和数据库状态
+  config explain      显示最终生效的配置和推导值
   scan                执行一次扫描并建立基线（默认全量）
   refresh             执行一次刷新（当前版本为全量，保证准确性）
   rebuild [名称]      只重新统计一个一级目录
@@ -503,18 +608,21 @@ func printHelp(w io.Writer) {
   dirspace --path /data top 10
   dirspace scan --path /data
   dirspace refresh --path /data
-  dirspace rebuild --path /data/cae365-test
-  dirspace rebuild cae365-test --path /mnt
+  dirspace rebuild --path /data/cache-a
+  dirspace rebuild cache-a --path /data
   dirspace pause --path /mnt
   dirspace backup --output /var/backups/dirspace.db
 
 默认配置:
+  profile=%s, interval=%s, retention=%d 天
   %s
   %s
 
 重要:
   查询命令只读 SQLite，不访问 NFS；扫描只读文件元数据，不读取文件内容。
-`, Version, config.Default().Database.RetentionDays, config.DefaultConfigPath, config.DefaultDBPath)
+`, Version, config.Default().Database.RetentionDays, config.DefaultProfile,
+		formatInterval(config.Default().Scan.Interval.Duration), config.Default().Database.RetentionDays,
+		config.DefaultConfigPath, config.DefaultDBPath)
 }
 
 // validateExplicitScanRoot applies the database-location guard to an explicit

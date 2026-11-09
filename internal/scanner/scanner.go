@@ -207,7 +207,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	controller.Start(scanCtx)
 
 	oldProcs := runtime.GOMAXPROCS(0)
-	procs := s.cfg.Performance.Concurrency
+	procs := s.cfg.Performance.Concurrency.Limit()
 	if procs < 1 {
 		procs = 1
 	}
@@ -324,7 +324,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		fatalMu.Unlock()
 		cancelScan()
 	}
-	workerCount := s.cfg.Performance.Concurrency
+	workerCount := s.cfg.Performance.Concurrency.Effective(len(pending))
 	if workerCount > len(pending) && len(pending) > 0 {
 		workerCount = len(pending)
 	}

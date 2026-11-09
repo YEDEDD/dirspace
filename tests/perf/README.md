@@ -55,7 +55,7 @@ cat /proc/self/mountstats
 
 | 项目 | 目标 |
 |---|---|
-| cgroup CPU | 不超过 `CPUQuota=10%` |
+| cgroup CPU | 不超过 `CPUQuota=20%` |
 | RSS / memory.current | < 512MB，无 OOM |
 | 应用元数据 QPS | <= `max_metadata_qps` |
 | NFS 客户端 ops/s | 与配置量级一致，无重试风暴 |

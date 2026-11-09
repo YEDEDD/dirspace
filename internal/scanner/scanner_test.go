@@ -39,7 +39,7 @@ func newScannerFixture(t *testing.T) *scannerFixture {
 	cfg := config.Default()
 	cfg.Scan.SizeBasis = "allocated"
 	cfg.Scan.Inventory.Enabled = false
-	cfg.Performance.Concurrency = 2
+	cfg.Performance.Concurrency = config.Concurrency{Max: 2}
 	cfg.Performance.MaxMetadataQPS = 100000
 	cfg.Performance.MinMetadataQPS = 1
 	cfg.Performance.MaxCPUPercent = 0

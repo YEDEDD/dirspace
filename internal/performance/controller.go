@@ -66,9 +66,19 @@ func NewController(limits Limits, log *slog.Logger) *Controller {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
+	startQPS := limits.BaseQPS
+	if limits.Adaptive && startQPS >= 10 {
+		// Start below the ceiling and let the sampler ramp up only while the
+		// filesystem stays healthy. This avoids hitting a shared NFS server at
+		// full rate in the first seconds of a scan.
+		startQPS = startQPS / 3
+		if startQPS < limits.MinQPS {
+			startQPS = limits.MinQPS
+		}
+	}
 	controller := &Controller{
 		limits:   limits,
-		throttle: NewThrottle(limits.BaseQPS, limits.MinQPS),
+		throttle: NewThrottle(startQPS, limits.MinQPS),
 		cpu:      NewCPUGuard(limits.MaxCPUPercent),
 		log:      log,
 	}

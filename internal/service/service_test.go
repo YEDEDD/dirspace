@@ -30,7 +30,7 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	cfg.Performance.MaxMetadataQPS = 100000
 	cfg.Performance.MaxCPUPercent = 0
 	cfg.Performance.AdaptiveThrottle = false
-	cfg.Performance.Concurrency = 2
+	cfg.Performance.Concurrency = config.Concurrency{Max: 2}
 	cfg.Performance.MemoryLimit.Bytes = 512 << 20
 	cfg.Scan.Inventory.Enabled = false
 	store, err := storage.Open(context.Background(), cfg.Database.Path, storage.Options{BusyTimeout: 2 * time.Second})
@@ -180,7 +180,7 @@ func TestScanRootCannotBeSymlink(t *testing.T) {
 
 func TestEffectiveStatus(t *testing.T) {
 	f := newServiceFixture(t)
-	old := time.Now().Add(-2 * time.Hour)
+	old := time.Now().Add(-30 * time.Hour)
 	if got := f.svc.EffectiveStatus(model.DataFresh, &old); got != model.DataStale {
 		t.Fatalf("old data status=%s", got)
 	}

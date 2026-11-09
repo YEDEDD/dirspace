@@ -145,3 +145,27 @@ func TestCLIVersionHelp(t *testing.T) {
 		t.Fatalf("help: %s", stdout)
 	}
 }
+
+func TestConfigExplainWorksWithoutDatabase(t *testing.T) {
+	root, db := cliFixture(t)
+	if err := os.MkdirAll(filepath.Dir(db), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(filepath.Dir(db), "config.yaml")
+	content := "profile: low\n" +
+		"database:\n  path: " + db + "\n" +
+		"scan:\n  root_path: " + root + "\n  interval: 1h\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := runCLI(t, "--config", cfgPath, "config", "explain")
+	if code != 0 {
+		t.Fatalf("config exit=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "profile：low") || !strings.Contains(stdout, "auto (max 4)") {
+		t.Fatalf("config output: %s", stdout)
+	}
+	if _, err := os.Stat(db); !os.IsNotExist(err) {
+		t.Fatalf("config explain opened the database: %v", err)
+	}
+}

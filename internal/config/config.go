@@ -137,6 +137,77 @@ func FormatBytes(n int64) string {
 	}
 }
 
+// Concurrency is a fixed worker count or "auto" with a maximum cap.
+// The zero value is treated as auto with the profile's cap.
+type Concurrency struct {
+	Auto bool
+	Max  int
+}
+
+func (c *Concurrency) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode {
+		return errors.New("concurrency must be an integer or \"auto\"")
+	}
+	if strings.EqualFold(strings.TrimSpace(node.Value), "auto") {
+		c.Auto = true
+		if c.Max < 1 {
+			c.Max = 8
+		}
+		return nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(node.Value))
+	if err != nil {
+		return fmt.Errorf("concurrency must be an integer or \"auto\": %w", err)
+	}
+	if n < 0 {
+		return errors.New("concurrency cannot be negative")
+	}
+	if n == 0 {
+		c.Auto = true
+		if c.Max < 1 {
+			c.Max = 8
+		}
+		return nil
+	}
+	c.Auto = false
+	c.Max = n
+	return nil
+}
+
+func (c Concurrency) MarshalYAML() (any, error) {
+	if c.Auto {
+		return "auto", nil
+	}
+	return c.Max, nil
+}
+
+// String is safe for human-readable logs.
+func (c Concurrency) String() string {
+	if c.Auto {
+		return fmt.Sprintf("auto (max %d)", c.Limit())
+	}
+	return strconv.Itoa(c.Limit())
+}
+
+// Limit returns the hard worker cap.
+func (c Concurrency) Limit() int {
+	if c.Max < 1 {
+		return 1
+	}
+	return c.Max
+}
+
+// Effective returns the worker count for the number of ready top-level
+// directories. Fixed values are still clamped by the caller; auto values use
+// only as many workers as there is work for.
+func (c Concurrency) Effective(ready int) int {
+	limit := c.Limit()
+	if c.Auto && ready > 0 && ready < limit {
+		return ready
+	}
+	return limit
+}
+
 // DatabaseConfig controls the local SQLite cache.
 type DatabaseConfig struct {
 	Path          string   `yaml:"path"`
@@ -148,10 +219,9 @@ type DatabaseConfig struct {
 type ScanConfig struct {
 	RootPath string `yaml:"root_path"`
 	// SizeBasis is "allocated" (default, close to du) or "logical".
-	SizeBasis        string   `yaml:"size_basis"`
-	ExtraRoots       []string `yaml:"extra_roots"`
-	Interval         Duration `yaml:"interval"`
-	FullScanInterval Duration `yaml:"full_scan_interval"`
+	SizeBasis  string   `yaml:"size_basis"`
+	ExtraRoots []string `yaml:"extra_roots"`
+	Interval   Duration `yaml:"interval"`
 	// ScanOnStart makes the daemon establish a baseline immediately when a root
 	// has never been scanned. Existing roots still wait for their interval.
 	ScanOnStart bool `yaml:"scan_on_start"`
@@ -159,8 +229,8 @@ type ScanConfig struct {
 	StartupDelay Duration `yaml:"startup_delay"`
 	// ResumeInterrupted lets the daemon continue an interrupted full scan.
 	ResumeInterrupted bool `yaml:"resume_interrupted"`
-	// Inventory is opt-in. It costs extra local DB writes and does not remove
-	// the need to inspect NFS metadata for every file.
+	// Inventory is experimental. It costs extra local DB writes and does not
+	// remove the need to inspect NFS metadata for every file.
 	Inventory InventoryConfig `yaml:"inventory"`
 }
 
@@ -169,16 +239,17 @@ type InventoryConfig struct {
 	BatchSize int  `yaml:"batch_size"`
 }
 
-// PerformanceConfig is intentionally conservative by default.
+// PerformanceConfig holds advanced overrides. Most users should select a
+// profile instead of editing these values.
 type PerformanceConfig struct {
-	Concurrency      int      `yaml:"concurrency"`
-	MaxMetadataQPS   int      `yaml:"max_metadata_qps"`
-	MinMetadataQPS   int      `yaml:"min_metadata_qps"`
-	MaxCPUPercent    int      `yaml:"max_cpu_percent"`
-	MemoryLimit      Bytes    `yaml:"memory_limit"`
-	AdaptiveThrottle bool     `yaml:"adaptive_throttle"`
-	LowPriority      bool     `yaml:"low_priority"`
-	SampleInterval   Duration `yaml:"sample_interval"`
+	Concurrency      Concurrency `yaml:"concurrency"`
+	MaxMetadataQPS   int         `yaml:"max_metadata_qps"`
+	MinMetadataQPS   int         `yaml:"min_metadata_qps"`
+	MaxCPUPercent    int         `yaml:"max_cpu_percent"`
+	MemoryLimit      Bytes       `yaml:"memory_limit"`
+	AdaptiveThrottle bool        `yaml:"adaptive_throttle"`
+	LowPriority      bool        `yaml:"low_priority"`
+	SampleInterval   Duration    `yaml:"sample_interval"`
 	// Host thresholds. Values <= 0 disable the corresponding check.
 	MaxHostCPUPercent float64  `yaml:"max_host_cpu_percent"`
 	MaxLoad1          float64  `yaml:"max_load1"`
@@ -196,6 +267,7 @@ type LoggingConfig struct {
 }
 
 type Config struct {
+	Profile     string            `yaml:"profile"`
 	Database    DatabaseConfig    `yaml:"database"`
 	Scan        ScanConfig        `yaml:"scan"`
 	Performance PerformanceConfig `yaml:"performance"`
@@ -203,9 +275,38 @@ type Config struct {
 	Source      string            `yaml:"-"`
 }
 
-// Default returns a deliberately low-load configuration.
-func Default() *Config {
-	return &Config{
+const (
+	// DefaultProfile is the safe default for mixed production use.
+	DefaultProfile = "normal"
+)
+
+func normalizeProfile(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "low":
+		return "low"
+	case "fast":
+		return "fast"
+	case "", "normal":
+		return DefaultProfile
+	default:
+		return ""
+	}
+}
+
+// Default returns the normal profile. Use DefaultForProfile to select a
+// conservative or throughput-oriented baseline.
+func Default() *Config { return DefaultForProfile(DefaultProfile) }
+
+// DefaultForProfile returns the baseline for low, normal, or fast.
+// Individual YAML values are decoded over this baseline, so advanced users can
+// override any field without losing the rest of the profile.
+func DefaultForProfile(name string) *Config {
+	profile := normalizeProfile(name)
+	if profile == "" {
+		profile = DefaultProfile
+	}
+	cfg := &Config{
+		Profile: profile,
 		Database: DatabaseConfig{
 			Path:          DefaultDBPath,
 			BusyTimeout:   Duration{5 * time.Second},
@@ -214,8 +315,7 @@ func Default() *Config {
 		Scan: ScanConfig{
 			RootPath:          "/mnt",
 			SizeBasis:         "allocated",
-			Interval:          Duration{30 * time.Minute},
-			FullScanInterval:  Duration{24 * time.Hour},
+			Interval:          Duration{24 * time.Hour},
 			ScanOnStart:       true,
 			StartupDelay:      Duration{15 * time.Second},
 			ResumeInterrupted: true,
@@ -225,16 +325,16 @@ func Default() *Config {
 			},
 		},
 		Performance: PerformanceConfig{
-			Concurrency:       2,
-			MaxMetadataQPS:    50,
-			MinMetadataQPS:    5,
-			MaxCPUPercent:     10,
+			Concurrency:       Concurrency{Auto: true, Max: 8},
+			MaxMetadataQPS:    300,
+			MinMetadataQPS:    30,
+			MaxCPUPercent:     20,
 			MemoryLimit:       Bytes{512 << 20},
 			AdaptiveThrottle:  true,
 			LowPriority:       true,
 			SampleInterval:    Duration{5 * time.Second},
 			MaxHostCPUPercent: 85,
-			MaxLoad1:          8,
+			MaxLoad1:          0,
 			NFSSlowLatency:    Duration{500 * time.Millisecond},
 			NFSPauseLatency:   Duration{5 * time.Second},
 			NFSPauseCooldown:  Duration{30 * time.Second},
@@ -244,6 +344,23 @@ func Default() *Config {
 		},
 		Logging: LoggingConfig{Level: "info", Format: "text"},
 	}
+	switch profile {
+	case "low":
+		cfg.Performance.Concurrency = Concurrency{Auto: true, Max: 4}
+		cfg.Performance.MaxMetadataQPS = 100
+		cfg.Performance.MinMetadataQPS = 10
+		cfg.Performance.MaxCPUPercent = 10
+		cfg.Performance.MemoryLimit = Bytes{256 << 20}
+	case "fast":
+		cfg.Performance.Concurrency = Concurrency{Auto: true, Max: 16}
+		cfg.Performance.MaxMetadataQPS = 1000
+		cfg.Performance.MinMetadataQPS = 100
+		cfg.Performance.MaxCPUPercent = 40
+		cfg.Performance.MemoryLimit = Bytes{1 << 30}
+		cfg.Performance.NFSSlowLatency = Duration{time.Second}
+		cfg.Performance.NFSPauseLatency = Duration{10 * time.Second}
+	}
+	return cfg
 }
 
 // ResolvePath finds the configuration file to use.
@@ -284,7 +401,7 @@ func ResolvePath(explicit string) (string, error) {
 	return "", nil
 }
 
-// Load reads a config file over the defaults and validates it.
+// Load reads a config file over the selected profile defaults and validates it.
 func Load(path string) (*Config, error) {
 	cfg := Default()
 	resolved, err := ResolvePath(path)
@@ -295,6 +412,19 @@ func Load(path string) (*Config, error) {
 		data, err := os.ReadFile(resolved)
 		if err != nil {
 			return nil, fmt.Errorf("读取配置文件失败: %w", err)
+		}
+		var head struct {
+			Profile string `yaml:"profile"`
+		}
+		if err := yaml.Unmarshal(data, &head); err != nil {
+			return nil, fmt.Errorf("解析配置文件 %s 失败: %w", resolved, err)
+		}
+		if strings.TrimSpace(head.Profile) != "" {
+			profile := normalizeProfile(head.Profile)
+			if profile == "" {
+				return nil, fmt.Errorf("profile 非法: %s（可选 low、normal、fast）", head.Profile)
+			}
+			cfg = DefaultForProfile(profile)
 		}
 		decoder := yaml.NewDecoder(strings.NewReader(string(data)))
 		decoder.KnownFields(true)
@@ -382,9 +512,6 @@ func (c *Config) Validate() error {
 	if c.Scan.Interval.Duration < 10*time.Second {
 		return errors.New("scan.interval 不能小于 10s")
 	}
-	if c.Scan.FullScanInterval.Duration < c.Scan.Interval.Duration {
-		return errors.New("scan.full_scan_interval 不能小于 scan.interval")
-	}
 	if c.Scan.StartupDelay.Duration < 0 {
 		return errors.New("scan.startup_delay 不能为负数")
 	}
@@ -392,15 +519,26 @@ func (c *Config) Validate() error {
 		return errors.New("scan.inventory.batch_size 必须在 100 到 2000 之间")
 	}
 
+	profile := normalizeProfile(c.Profile)
+	if profile == "" {
+		return fmt.Errorf("profile 非法: %s（可选 low、normal、fast）", c.Profile)
+	}
+	c.Profile = profile
+
 	p := &c.Performance
-	if p.Concurrency < 1 || p.Concurrency > 64 {
-		return errors.New("performance.concurrency 必须在 1 到 64 之间")
+	if p.Concurrency.Max < 1 || p.Concurrency.Max > 64 {
+		return errors.New("performance.concurrency 上限必须在 1 到 64 之间")
 	}
 	if p.MaxMetadataQPS < 1 || p.MaxMetadataQPS > 1_000_000 {
 		return errors.New("performance.max_metadata_qps 必须在 1 到 1000000 之间")
 	}
-	if p.MinMetadataQPS < 1 || p.MinMetadataQPS > p.MaxMetadataQPS {
-		return errors.New("performance.min_metadata_qps 必须在 1 到 max_metadata_qps 之间")
+	if p.MinMetadataQPS < 1 {
+		return errors.New("performance.min_metadata_qps 必须至少为 1")
+	}
+	// A profile supplies min QPS, but an explicit lower max QPS must still be
+	// usable. Clamp the floor to the ceiling instead of rejecting the config.
+	if p.MinMetadataQPS > p.MaxMetadataQPS {
+		p.MinMetadataQPS = p.MaxMetadataQPS
 	}
 	if p.MaxCPUPercent < 1 || p.MaxCPUPercent > 100 {
 		return errors.New("performance.max_cpu_percent 必须在 1 到 100 之间")

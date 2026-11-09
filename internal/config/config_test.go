@@ -47,7 +47,6 @@ func TestLoadAndValidate(t *testing.T) {
 scan:
   root_path: ` + filepath.Join(base, "data") + `
   interval: 45m
-  full_scan_interval: 36h
   size_basis: logical
 performance:
   concurrency: 3
@@ -63,10 +62,10 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Scan.Interval.Duration != 45*time.Minute || cfg.Scan.FullScanInterval.Duration != 36*time.Hour {
-		t.Fatalf("durations: %v %v", cfg.Scan.Interval, cfg.Scan.FullScanInterval)
+	if cfg.Scan.Interval.Duration != 45*time.Minute {
+		t.Fatalf("durations: %v", cfg.Scan.Interval)
 	}
-	if cfg.Scan.SizeBasis != "logical" || cfg.Performance.Concurrency != 3 {
+	if cfg.Scan.SizeBasis != "logical" || cfg.Performance.Concurrency.Limit() != 3 || cfg.Performance.Concurrency.Auto {
 		t.Fatalf("cfg=%+v", cfg)
 	}
 	if cfg.Performance.MaxMetadataQPS != 25 || cfg.Performance.MemoryLimit.Bytes != 256<<20 {
@@ -121,5 +120,68 @@ func TestUnknownFieldRejected(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("unknown field accepted")
+	}
+}
+
+func TestProfilesAndOverrides(t *testing.T) {
+	base := t.TempDir()
+	write := func(content string) string {
+		path := filepath.Join(base, "config.yaml")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	db := filepath.Join(base, "db", "usage.db")
+	root := filepath.Join(base, "data")
+	baseYAML := "database:\n  path: " + db + "\nscan:\n  root_path: " + root + "\n  interval: 1h\n"
+
+	cfg, err := Load(write(baseYAML + "profile: low\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Profile != "low" || cfg.Performance.MaxMetadataQPS != 100 {
+		t.Fatalf("low profile: %+v", cfg.Performance)
+	}
+	if !cfg.Performance.Concurrency.Auto || cfg.Performance.Concurrency.Max != 4 {
+		t.Fatalf("low concurrency: %+v", cfg.Performance.Concurrency)
+	}
+	if cfg.Performance.MaxLoad1 != 0 || cfg.Scan.Interval.Duration != time.Hour {
+		t.Fatalf("low defaults: load=%v interval=%v", cfg.Performance.MaxLoad1, cfg.Scan.Interval)
+	}
+
+	cfg, err = Load(write(baseYAML + "profile: fast\nperformance:\n  concurrency: auto\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Performance.Concurrency.Auto || cfg.Performance.Concurrency.Max != 16 {
+		t.Fatalf("fast auto concurrency: %+v", cfg.Performance.Concurrency)
+	}
+
+	cfg, err = Load(write(baseYAML + "profile: normal\nperformance:\n  concurrency: 3\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Performance.Concurrency.Auto || cfg.Performance.Concurrency.Limit() != 3 {
+		t.Fatalf("fixed concurrency: %+v", cfg.Performance.Concurrency)
+	}
+	if cfg.Performance.Concurrency.Effective(1) != 3 || cfg.Performance.Concurrency.Effective(9) != 3 {
+		t.Fatalf("fixed effective: %+v", cfg.Performance.Concurrency)
+	}
+	if got := (Concurrency{Auto: true, Max: 8}).Effective(3); got != 3 {
+		t.Fatalf("auto effective=%d", got)
+	}
+
+	if _, err := Load(write(baseYAML + "profile: turbo\n")); err == nil {
+		t.Fatal("invalid profile accepted")
+	}
+}
+
+func TestDefaultIntervalIsDaily(t *testing.T) {
+	if got := Default().Scan.Interval.Duration; got != 24*time.Hour {
+		t.Fatalf("default interval=%v", got)
+	}
+	if got := Default().Performance.MaxLoad1; got != 0 {
+		t.Fatalf("default max_load1=%v", got)
 	}
 }

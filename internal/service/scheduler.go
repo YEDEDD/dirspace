@@ -112,6 +112,13 @@ func (s *Service) runScheduledRoot(ctx context.Context, root string) error {
 		"accuracy", summary.Accuracy, "dirs", summary.DoneDirs,
 		"files", summary.FileCount, "bytes", summary.TotalAlloc,
 		"duration", summary.Duration.Round(time.Millisecond).String())
+	// Keep the local database bounded without requiring a second timer. The
+	// cleanup only removes history/old runs; current cache rows are untouched.
+	if history, runs, cleanupErr := s.CleanupHistory(ctx, 0, false); cleanupErr != nil {
+		s.Log.Warn("自动清理历史失败", "error", cleanupErr.Error())
+	} else if history > 0 || runs > 0 {
+		s.Log.Info("已自动清理历史", "history_rows", history, "runs", runs)
+	}
 	return nil
 }
 

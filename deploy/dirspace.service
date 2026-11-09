@@ -14,7 +14,6 @@ User=root
 Group=root
 WorkingDirectory=/
 Environment=DIRSPACE_CONFIG=/etc/dirspace/config.yaml
-Environment=GOMAXPROCS=2
 ExecStart=/usr/local/bin/dirspace daemon --config /etc/dirspace/config.yaml
 Restart=on-failure
 RestartSec=15s
@@ -25,7 +24,7 @@ TimeoutStopSec=60s
 # 应用内部还会执行 QPS 限流、进程 CPU 自适应降速和 NFS 延迟暂停。
 Nice=19
 CPUAccounting=true
-CPUQuota=10%
+CPUQuota=20%
 CPUWeight=10
 MemoryAccounting=true
 MemoryHigh=480M
