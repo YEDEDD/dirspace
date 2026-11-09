@@ -1,0 +1,10 @@
+/bin/
+*.db
+*.db-wal
+*.db-shm
+*.corrupt-*
+*.backup-*
+.DS_Store
+*.swp
+*.tmp
+coverage.out

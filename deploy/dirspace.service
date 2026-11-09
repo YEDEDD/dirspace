@@ -1,0 +1,66 @@
+[Unit]
+Description=dirspace NFS directory space collector
+Documentation=file:/usr/share/doc/dirspace/README.md
+After=network-online.target remote-fs.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+# NFS 不可用时不要反复重启；工具会保留本地缓存。
+RequiresMountsFor=/var/lib/dirspace
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/
+Environment=DIRSPACE_CONFIG=/etc/dirspace/config.yaml
+Environment=GOMAXPROCS=2
+ExecStart=/usr/local/bin/dirspace daemon --config /etc/dirspace/config.yaml
+Restart=on-failure
+RestartSec=15s
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+
+# 资源硬上限：CPU 配额、内存和任务数由 systemd/cgroup 兜底。
+# 应用内部还会执行 QPS 限流、进程 CPU 自适应降速和 NFS 延迟暂停。
+Nice=19
+CPUAccounting=true
+CPUQuota=10%
+CPUWeight=10
+MemoryAccounting=true
+MemoryHigh=480M
+MemoryMax=512M
+TasksAccounting=true
+TasksMax=128
+IOAccounting=true
+IOWeight=10
+LimitNOFILE=4096
+
+# 数据目录由 systemd 创建并仅允许该服务写入；SQLite 不得放在 NFS 上。
+StateDirectory=dirspace
+StateDirectoryMode=0700
+ConfigurationDirectory=dirspace
+UMask=0077
+
+# 收紧权限，但保留对 /mnt、/data、/home 等业务挂载的只读访问。
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+NoNewPrivileges=true
+
+# 说明：IOWeight 只影响本机块设备调度，不能限制 NFS 元数据请求；
+# 真正的 NFS 保护来自应用内 max_metadata_qps / 并发数 / 延迟暂停。
+
+[Install]
+WantedBy=multi-user.target

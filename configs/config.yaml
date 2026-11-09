@@ -1,0 +1,72 @@
+# dirspace 生产配置示例
+#
+# 默认值刻意非常保守：2 个扫描协程、全局限速 50 次元数据操作/秒、
+# 进程 CPU 上限 10%、内存目标 512MB。首次扫描百万级文件可能需要数小时，
+# 这是为了避免影响 Kubernetes 生产负载。确认维护窗口和 NFS 余量后再调高。
+
+database:
+  # 必须位于本地磁盘，不能在任何扫描根目录或 NFS 挂载内。
+  path: /var/lib/dirspace/usage.db
+  busy_timeout: 5s
+  retention_days: 90
+
+scan:
+  # 默认扫描根目录。只统计其下一级子目录；更深层内容会递归汇总到一级目录。
+  root_path: /mnt
+
+  # 可选：额外扫描根。每个根独立保存，查询时按 --path 精确匹配。
+  # extra_roots:
+  #   - /data
+  #   - /home
+
+  # 后台刷新间隔。不是实时监控；NFSv3 客户端无法可靠感知服务端变化。
+  interval: 30m
+
+  # 预留给未来的安全增量模式。当前版本每轮 refresh 都是全量，
+  # 不使用目录 mtime 或文件清单跳过 NFS 元数据，以免牺牲准确性。
+  full_scan_interval: 24h
+
+  # 从未扫描过的根在 daemon 启动后立即建立基线；已有数据的根等待 interval。
+  scan_on_start: true
+
+  # 启动后延迟，避免和业务高峰/主机启动风暴叠加。
+  startup_delay: 15s
+
+  # 服务异常退出后，daemon 自动续扫未完成的任务。
+  resume_interrupted: true
+
+  # allocated（默认，近似 du 的 st_blocks×512）或 logical（st_size）。
+  size_basis: allocated
+
+  # 可选文件清单。默认关闭。开启后只多写本地 SQLite，不会减少 NFS 元数据读取；
+  # 当前版本也不依赖它做“少读目录”的增量，仅作为未来扩展和排障数据。
+  inventory:
+    enabled: false
+    batch_size: 1000
+
+performance:
+  concurrency: 2
+  max_metadata_qps: 50
+  min_metadata_qps: 5
+  max_cpu_percent: 10
+  memory_limit: 512MB
+  adaptive_throttle: true
+  low_priority: true
+  sample_interval: 5s
+
+  # 主机级保护阈值；任一触发都会临时压低扫描速率。0 表示关闭单项检查。
+  max_host_cpu_percent: 85
+  max_load1: 8
+
+  # NFS 延迟升高时降速；超过暂停阈值时暂停，冷却后自动恢复。
+  nfs_slow_latency: 500ms
+  nfs_pause_latency: 5s
+  nfs_pause_cooldown: 30s
+  max_metadata_errors: 8
+
+  progress_interval: 10s
+  heartbeat_interval: 5s
+
+logging:
+  level: info
+  format: text
