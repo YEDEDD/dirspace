@@ -128,11 +128,11 @@ scan:
 
 | profile | QPS 上限 | worker 上限 | CPU | 内存默认值 | 适用 |
 |---|---:|---:|---:|---:|---|
-| `low` | 100 | 4 | 10% | 256MB | 生产优先 |
-| `normal` | 300 | 8 | 20% | 512MB | 默认 |
-| `fast` | 1000 | 16 | 40% | 1GB | 维护窗口 |
+| `low` | 100 | 4 | 10% | auto | 生产优先 |
+| `normal` | 300 | 8 | 20% | auto | 默认 |
+| `fast` | 1000 | 16 | 40% | auto | 维护窗口 |
 
-profile 只是基线，`performance` 下的字段可以覆盖它。
+profile 只是基线，`performance` 下的字段可以覆盖它。三个 profile 的内存默认都是 `auto`：优先按 cgroup 上限的 80% 推导，没有 cgroup 时按物理内存 10%（256MB–4GB）。
 
 ### 自动推导
 

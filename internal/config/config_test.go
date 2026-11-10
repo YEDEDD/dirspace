@@ -190,6 +190,9 @@ func TestDefaultIntervalIsWeekly(t *testing.T) {
 	if got := Default().Database.StaleRetentionDays; got != 7 {
 		t.Fatalf("default stale retention=%d", got)
 	}
+	if !Default().Performance.MemoryLimit.Auto {
+		t.Fatal("default memory limit should be auto")
+	}
 	if got := Default().Performance.MaxLoad1; got != 0 {
 		t.Fatalf("default max_load1=%v", got)
 	}
@@ -207,5 +210,21 @@ func TestAutoMemoryLimit(t *testing.T) {
 	}
 	if got := wrapper.M.Resolve(); got < 32<<20 {
 		t.Fatalf("resolved limit too small: %d", got)
+	}
+	cases := []struct {
+		cgroup, total, want int64
+	}{
+		{cgroup: 200 << 20, want: 160 << 20},
+		{cgroup: 20 << 20, want: 20 << 20},
+		{cgroup: 4 << 30, want: 3435973836},
+		{total: 1 << 30, want: 256 << 20},
+		{total: 10 << 30, want: 1 << 30},
+		{total: 100 << 30, want: 4 << 30},
+		{want: 512 << 20},
+	}
+	for _, tc := range cases {
+		if got := autoMemoryLimit(tc.cgroup, tc.total); got != tc.want {
+			t.Fatalf("autoMemoryLimit(%d,%d)=%d want %d", tc.cgroup, tc.total, got, tc.want)
+		}
 	}
 }

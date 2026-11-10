@@ -98,20 +98,29 @@ func (b Bytes) MarshalYAML() (any, error) {
 }
 
 // Resolve returns the configured byte limit or an automatic limit derived from
-// the service cgroup. Automatic limits leave headroom for the rest of the
-// process and never fall below 256MB.
+// the service cgroup. The cgroup branch stays below the hard cgroup limit even
+// on small machines; the physical-memory fallback never goes below 256MB.
 func (b Bytes) Resolve() int64 {
 	if !b.Auto {
 		return b.Bytes
 	}
-	if limit := cgroupMemoryLimit(); limit > 0 {
-		value := int64(float64(limit) * 0.8)
-		if value < 256<<20 {
-			value = 256 << 20
+	return autoMemoryLimit(cgroupMemoryLimit(), memTotal())
+}
+
+// autoMemoryLimit keeps the application guard below the cgroup hard limit.
+// A cgroup limit is authoritative; physical memory is only a fallback.
+func autoMemoryLimit(cgroup, total int64) int64 {
+	if cgroup > 0 {
+		value := int64(float64(cgroup) * 0.8)
+		if value < 32<<20 {
+			value = cgroup
+			if value > 32<<20 {
+				value = 32 << 20
+			}
 		}
 		return value
 	}
-	if total := memTotal(); total > 0 {
+	if total > 0 {
 		value := int64(float64(total) * 0.10)
 		if value < 256<<20 {
 			value = 256 << 20
@@ -426,7 +435,7 @@ func DefaultForProfile(name string) *Config {
 			MaxMetadataQPS:    300,
 			MinMetadataQPS:    30,
 			MaxCPUPercent:     20,
-			MemoryLimit:       Bytes{Bytes: 512 << 20},
+			MemoryLimit:       Bytes{Auto: true},
 			AdaptiveThrottle:  true,
 			LowPriority:       true,
 			SampleInterval:    Duration{5 * time.Second},
@@ -447,13 +456,13 @@ func DefaultForProfile(name string) *Config {
 		cfg.Performance.MaxMetadataQPS = 100
 		cfg.Performance.MinMetadataQPS = 10
 		cfg.Performance.MaxCPUPercent = 10
-		cfg.Performance.MemoryLimit = Bytes{Bytes: 256 << 20}
+		cfg.Performance.MemoryLimit = Bytes{Auto: true}
 	case "fast":
 		cfg.Performance.Concurrency = Concurrency{Auto: true, Max: 16}
 		cfg.Performance.MaxMetadataQPS = 1000
 		cfg.Performance.MinMetadataQPS = 100
 		cfg.Performance.MaxCPUPercent = 40
-		cfg.Performance.MemoryLimit = Bytes{Bytes: 1 << 30}
+		cfg.Performance.MemoryLimit = Bytes{Auto: true}
 		cfg.Performance.NFSSlowLatency = Duration{time.Second}
 		cfg.Performance.NFSPauseLatency = Duration{10 * time.Second}
 	}
