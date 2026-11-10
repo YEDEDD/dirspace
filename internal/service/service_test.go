@@ -300,3 +300,44 @@ func TestStatusRecoversAbandonedRun(t *testing.T) {
 		t.Fatalf("root still scanning after recovery")
 	}
 }
+
+func TestInterruptedExactSchedulesResumeBeforeQuick(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	run, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeFull, SizeBasis: model.BasisAllocated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SaveDirResult(context.Background(), run.ID, model.DirOutcome{
+		Name: "alpha", AllocBytes: 1024, FileCount: 1, CompletedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AbortRun(context.Background(), run.ID, model.RunInterrupted, "test restart"); err != nil {
+		t.Fatal(err)
+	}
+	sc := f.svc.nextSchedule(context.Background(), root)
+	if sc.exact.After(time.Now().Add(2 * time.Second)) {
+		t.Fatalf("interrupted exact not scheduled for resume: %s", sc.exact)
+	}
+	if !sc.quick.IsZero() && !sc.quick.After(time.Now()) {
+		t.Fatalf("quick must not run before exact resume: %s", sc.quick)
+	}
+}
+
+func TestQuickRefusesWhileExactIsActive(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	if _, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeFull, SizeBasis: model.BasisAllocated,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{Mode: model.ModeQuick}); err == nil {
+		t.Fatal("quick scan should be refused while exact is active")
+	}
+}

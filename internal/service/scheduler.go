@@ -184,6 +184,20 @@ func (s *Service) nextSchedule(ctx context.Context, rootPath string) scanSchedul
 		}
 		return sc
 	}
+	// A daemon restart must resume an unfinished exact run before any quick
+	// estimate. Quick StartRun invalidates staging; starting it first would
+	// throw away all completed top-level directories. This also prevents an
+	// interrupted exact run from being pushed a full interval into the future.
+	if latest, runErr := s.Store.LastRunByMode(ctx, root.ID, model.ModeFull); runErr == nil && latest != nil {
+		switch latest.Status {
+		case model.RunInterrupted, model.RunRunning, model.RunPaused:
+			sc.exact = now
+			if s.Cfg.Scan.QuickInterval.Duration > 0 {
+				sc.quick = now.Add(s.Cfg.Scan.QuickInterval.Duration)
+			}
+			return sc
+		}
+	}
 	if root.LastSuccessAt == nil && s.Cfg.Scan.ScanOnStart {
 		sc.exact, sc.quick = now, now
 	} else {

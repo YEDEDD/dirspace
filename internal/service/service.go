@@ -80,12 +80,22 @@ func (s *Service) Scan(ctx context.Context, path string, opts ScanOptions) (*mod
 
 	mode := opts.Mode
 	if mode == "" {
-		// This release intentionally performs a full metadata walk for every
-		// refresh. NFSv3 directory mtimes are not a safe change detector, and a
-		// file-level inventory still requires one metadata lookup per file, so a
-		// fake "incremental" mode would silently reduce accuracy. The mode is
-		// kept in the schema for a future safe implementation.
 		mode = model.ModeFull
+	}
+	if mode == model.ModeQuick {
+		if root, rootErr := s.Store.GetRoot(ctx, rootPath); rootErr == nil {
+			if active, activeErr := s.Store.ActiveRun(ctx, root.ID); activeErr == nil && active.Mode == model.ModeFull {
+				return nil, fmt.Errorf("精确扫描正在进行（#%d），请等它完成后再执行快速估算", active.ID)
+			}
+			if s.Cfg.Scan.ResumeInterrupted {
+				if latest, runErr := s.Store.LastRunByMode(ctx, root.ID, model.ModeFull); runErr == nil && latest != nil {
+					switch latest.Status {
+					case model.RunInterrupted, model.RunRunning, model.RunPaused:
+						return nil, fmt.Errorf("有未完成的精确扫描（#%d），请先执行 dirspace scan --resume 续扫", latest.ID)
+					}
+				}
+			}
+		}
 	}
 	resume := opts.Resume
 	summary, err := s.scanner.Scan(ctx, scanner.Request{

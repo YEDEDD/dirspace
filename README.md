@@ -170,6 +170,47 @@ database:
 
 不要把数据库放在共享存储上，也不要放在扫描根目录内。
 
+## 重启、替换二进制与续扫
+
+- **只替换二进制文件**：Linux 上正在运行的进程继续使用旧 inode，当前扫描不受影响；之后执行的 `dirspace status/top` 已经是新二进制，可以正常读 SQLite。
+- **`systemctl restart`**：旧进程收到 SIGTERM，当前精确扫描会中断，未完成的一级目录不会发布；已完成目录的 staging 会保留。
+- 新进程启动时，如果最新精确任务处于 `interrupted/running/paused`，会**先恢复精确扫描，再安排快速估算**；不会让 quick 先把 staging 冲掉。
+- 恢复需要 `scan.resume_interrupted: true`（默认 true），并且配置、数据库和扫描根保持一致。
+- 进程被 `SIGKILL` 或异常退出时，90 秒没有心跳后会被标记为中断，下一次精确扫描会尝试续扫。
+- 精确扫描进行中，手动 `quick` 会被拒绝，避免覆盖 staging。
+
+### 从旧 mnt-usage 升级
+
+旧 `mnt-usage` 的配置、数据库 schema 和 systemd 单元名不一定与 `dirspace` 完全一致。**不要直接覆盖旧数据库**，先按下面顺序验证：
+
+```bash
+# 1. 备份数据库（含 WAL）
+sudo cp -a /var/lib/mnt-usage/usage.db /var/lib/mnt-usage/usage.db.bak
+sudo cp -a /var/lib/mnt-usage/usage.db-wal /var/lib/mnt-usage/usage.db-wal.bak 2>/dev/null || true
+sudo cp -a /var/lib/mnt-usage/usage.db-shm /var/lib/mnt-usage/usage.db-shm.bak 2>/dev/null || true
+
+# 2. 在副本上验证新版能否识别旧 schema 和配置
+cp /var/lib/mnt-usage/usage.db /tmp/mnt-usage-test.db
+dirspace --config /etc/mnt-usage/config.yaml --db /tmp/mnt-usage-test.db   status --path /mnt
+```
+
+如果第 2 步报配置字段或数据库版本错误，说明旧版本与当前 schema 不兼容；保留旧库，改用新配置/新数据库重新扫描，不要强行迁移。
+
+验证通过后，再决定是否重启旧服务：
+
+```bash
+# 先看旧单元到底怎么启动的
+systemctl cat mnt-usage.service
+
+# 如果单元直接引用 /usr/local/bin/mnt-usage，可原地替换文件
+sudo install -m 0755 dirspace-linux-amd64 /usr/local/bin/mnt-usage
+
+# 或者把 ExecStart 改成 /usr/local/bin/dirspace，并保留原来的 --config/--db 参数
+sudo systemctl daemon-reload
+```
+
+旧任务 `65/66` 已有大量 staging 时，升级后第一次启动应当恢复精确任务，只重扫未完成目录；前提是旧数据库里的 run 状态和 `run_dirs` 仍可读。
+
 ## 扫描耗时
 
 精确全量仍然是**全量元数据遍历**，没有安全的通用增量。先看公式：
