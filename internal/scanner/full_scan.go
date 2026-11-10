@@ -72,6 +72,9 @@ func (s *Scanner) scanRootSelf(ctx context.Context, sess *scanSession) (out mode
 		return out, fmt.Errorf("打开扫描根目录失败 %s: %w", sess.rootPath, err)
 	}
 	defer f.Close()
+	if err := sess.wait(ctx); err != nil {
+		return out, err
+	}
 	statStart := time.Now()
 	info, statErr := f.Stat()
 	sess.controller.ObserveMetadata(time.Since(statStart), statErr)

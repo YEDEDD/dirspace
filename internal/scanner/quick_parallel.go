@@ -157,6 +157,9 @@ func (s *Scanner) processQuickDirTask(ctx context.Context, sess *scanSession, q 
 	}
 	defer f.Close()
 
+	if err := sess.wait(ctx); err != nil {
+		return agg, err
+	}
 	statStart := time.Now()
 	info, statErr := f.Stat()
 	sess.controller.ObserveMetadata(time.Since(statStart), statErr)
@@ -243,6 +246,9 @@ readLoop:
 				if !classify {
 					continue
 				}
+				if err := sess.wait(ctx); err != nil {
+					return agg, err
+				}
 				infoStart := time.Now()
 				fileInfo, infoErr = entry.Info()
 				sess.controller.ObserveMetadata(time.Since(infoStart), infoErr)
@@ -286,6 +292,9 @@ readLoop:
 				continue
 			}
 			if fileInfo == nil {
+				if err := sess.wait(ctx); err != nil {
+					return agg, err
+				}
 				infoStart := time.Now()
 				fileInfo, infoErr = os.Lstat(path)
 				sess.controller.ObserveMetadata(time.Since(infoStart), infoErr)
