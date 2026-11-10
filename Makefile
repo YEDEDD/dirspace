@@ -2,7 +2,7 @@ GO ?= go
 BINARY := bin/dirspace
 LINUX_AMD64 := bin/dirspace-linux-amd64
 LINUX_ARM64 := bin/dirspace-linux-arm64
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 1.2.0)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 1.2.1)
 LDFLAGS := -s -w -X github.com/YEDEDD/dirspace/internal/cli.Version=$(VERSION)
 
 .PHONY: all build build-linux build-linux-arm64 test test-race vet fmt fmt-check check clean install uninstall perf

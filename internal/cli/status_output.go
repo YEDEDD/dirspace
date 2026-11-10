@@ -280,6 +280,7 @@ type scanJSON struct {
 	TotalText         string    `json:"total_text"`
 	TotalLogicalBytes int64     `json:"total_logical_bytes"`
 	FileCount         int64     `json:"file_count"`
+	FilesPerSecond    float64   `json:"files_per_second"`
 	DirCount          int64     `json:"dir_count"`
 	Resumed           bool      `json:"resumed"`
 	SizeBasis         string    `json:"size_basis"`
@@ -318,11 +319,19 @@ func buildScanJSON(summary *model.ScanSummary) scanJSON {
 		TotalText:         formatSize(total),
 		TotalLogicalBytes: summary.TotalLogical,
 		FileCount:         summary.FileCount,
+		FilesPerSecond:    scanFileRate(summary),
 		DirCount:          summary.DirCount,
 		Resumed:           summary.Resumed,
 		SizeBasis:         basisValue(summary.SizeBasis),
 		Errors:            summary.Errors,
 	}
+}
+
+func scanFileRate(summary *model.ScanSummary) float64 {
+	if summary == nil || summary.Duration <= 0 || summary.FileCount <= 0 {
+		return 0
+	}
+	return float64(summary.FileCount) / summary.Duration.Seconds()
 }
 
 func printScanSummary(w io.Writer, summary *model.ScanSummary) {
@@ -353,6 +362,9 @@ func printScanSummary(w io.Writer, summary *model.ScanSummary) {
 	fmt.Fprintf(w, "%s：%s（实际分配 %s，逻辑 %s）\n",
 		spaceLabel, formatSize(selectedTotal), formatSize(summary.TotalAlloc), formatSize(summary.TotalLogical))
 	fmt.Fprintf(w, "%s：%s\n", fileLabel, formatCount(summary.FileCount))
+	if rate := scanFileRate(summary); rate > 0 {
+		fmt.Fprintf(w, "文件吞吐：%.0f 文件/秒\n", rate)
+	}
 	fmt.Fprintf(w, "数据状态：%s\n", statusText(summary.DataStatus))
 	fmt.Fprintf(w, "准确性：%s\n", summary.Accuracy.Label())
 	if summary.Resumed {
