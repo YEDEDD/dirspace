@@ -1,5 +1,5 @@
 [Unit]
-Description=dirspace NFS directory space collector
+Description=dirspace directory space collector (CFS/Lustre/NFS)
 Documentation=file:/usr/share/doc/dirspace/README.md
 After=network-online.target remote-fs.target
 Wants=network-online.target
@@ -20,15 +20,16 @@ RestartSec=15s
 KillSignal=SIGTERM
 TimeoutStopSec=60s
 
-# 资源硬上限：CPU 配额、内存和任务数由 systemd/cgroup 兜底。
-# 应用内部还会执行 QPS 限流、进程 CPU 自适应降速和 NFS 延迟暂停。
+# 资源上限：按整机物理内存百分比自动缩放，避免写死 512M。
+# CPUQuota 的百分比是“单核”的百分比；100% 表示最多一个 CPU 核。
+# 应用内部还会执行 QPS 限流、CPU 自适应降速和共享文件系统延迟暂停。
 Nice=19
 CPUAccounting=true
-CPUQuota=20%
+CPUQuota=100%
 CPUWeight=10
 MemoryAccounting=true
-MemoryHigh=480M
-MemoryMax=512M
+MemoryHigh=12%
+MemoryMax=20%
 TasksAccounting=true
 TasksMax=128
 IOAccounting=true
@@ -59,7 +60,7 @@ RemoveIPC=true
 NoNewPrivileges=true
 
 # 说明：IOWeight 只影响本机块设备调度，不能限制 NFS 元数据请求；
-# 真正的 NFS 保护来自应用内 max_metadata_qps / 并发数 / 延迟暂停。
+# 真正的共享文件系统保护来自应用内 max_metadata_qps / 并发数 / 延迟暂停。
 
 [Install]
 WantedBy=multi-user.target

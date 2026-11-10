@@ -75,16 +75,18 @@ func (c *progressCounters) getCurrent() string {
 }
 
 type scanSession struct {
-	rootPath     string
-	runID        int64
-	rootID       int64
-	single       bool
-	controller   *performance.Controller
-	hardlinks    *hardlinkRegistry
-	inventory    *inventoryWriter
-	counters     *progressCounters
-	control      *scanControl
-	intraWorkers int
+	rootPath           string
+	runID              int64
+	rootID             int64
+	single             bool
+	controller         *performance.Controller
+	hardlinks          *hardlinkRegistry
+	inventory          *inventoryWriter
+	counters           *progressCounters
+	control            *scanControl
+	intraWorkers       int
+	quick              bool
+	quickSamplePercent int
 }
 
 type fatalError struct{ err error }
@@ -199,7 +201,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		BaseQPS:          s.cfg.Performance.MaxMetadataQPS,
 		MinQPS:           s.cfg.Performance.MinMetadataQPS,
 		MaxCPUPercent:    s.cfg.Performance.MaxCPUPercent,
-		MemoryLimit:      s.cfg.Performance.MemoryLimit.Bytes,
+		MemoryLimit:      s.cfg.Performance.MemoryLimit.Resolve(),
 		Adaptive:         s.cfg.Performance.AdaptiveThrottle,
 		SampleInterval:   s.cfg.Performance.SampleInterval.Duration,
 		MaxHostCPU:       s.cfg.Performance.MaxHostCPUPercent,
@@ -227,6 +229,25 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	if err != nil {
 		summary := s.finishAbort(run, req, control, err)
 		return summary, canceled(control, err)
+	}
+	if req.Mode == model.ModeIncremental {
+		states, stateErr := s.store.DirStates(scanCtx, run.RootID)
+		if stateErr != nil {
+			summary := s.finishAbort(run, req, control, stateErr)
+			return summary, canceled(control, stateErr)
+		}
+		if len(states) == 0 {
+			err := errors.New("尚无精确基线，--new 需要先执行一次全量扫描")
+			summary := s.finishAbort(run, req, control, err)
+			return summary, canceled(control, err)
+		}
+		filtered := entries[:0]
+		for _, entry := range entries {
+			if states[entry.name] != string(model.DataFresh) {
+				filtered = append(filtered, entry)
+			}
+		}
+		entries = filtered
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
 
@@ -279,20 +300,22 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	run.TotalDirs = len(entries)
 
 	var inv *inventoryWriter
-	if s.cfg.Scan.Inventory.Enabled {
+	if s.cfg.Scan.Inventory.Enabled && req.Mode != model.ModeQuick {
 		inv = newInventoryWriter(scanCtx, cancelScan, s.store, run.ID, run.RootID,
 			s.cfg.Scan.Inventory.BatchSize, s.log)
 	}
 	sess := &scanSession{
-		rootPath:   rootPath,
-		runID:      run.ID,
-		rootID:     run.RootID,
-		single:     req.TargetDir != "",
-		controller: controller,
-		hardlinks:  &hardlinkRegistry{store: s.store, runID: run.ID},
-		inventory:  inv,
-		counters:   counters,
-		control:    control,
+		rootPath:           rootPath,
+		runID:              run.ID,
+		rootID:             run.RootID,
+		single:             req.TargetDir != "",
+		controller:         controller,
+		hardlinks:          &hardlinkRegistry{store: s.store, runID: run.ID},
+		inventory:          inv,
+		counters:           counters,
+		control:            control,
+		quick:              req.Mode == model.ModeQuick,
+		quickSamplePercent: s.cfg.Scan.QuickSamplePercent,
 	}
 
 	heartbeatCtx, stopHeartbeat := context.WithCancel(scanCtx)
@@ -302,7 +325,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	// Files and the directory block directly under the scan root belong to the
 	// root aggregate, not to any first-level child. They are captured before
 	// workers start so hard-link attribution is deterministic.
-	if req.TargetDir == "" {
+	if req.TargetDir == "" && req.Mode != model.ModeIncremental {
 		selfOut, selfErr := s.scanRootSelf(scanCtx, sess)
 		if selfErr != nil {
 			summary := s.finishAbort(run, req, control, selfErr)
@@ -425,9 +448,10 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		return summary, canceled(control, ctx.Err())
 	}
 
-	summary, err := s.store.CompleteRun(ctx, run.ID, req.TargetDir != "", func() bool {
-		return control.canceled.Load()
-	})
+	summary, err := s.store.CompleteRun(ctx, run.ID, req.TargetDir != "",
+		req.TargetDir != "" || req.Mode == model.ModeIncremental, func() bool {
+			return control.canceled.Load()
+		})
 	if err != nil {
 		summary := s.finishAbort(run, req, control, fmt.Errorf("提交统计结果失败: %w", err))
 		return summary, canceled(control, err)

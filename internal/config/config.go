@@ -55,11 +55,24 @@ func (d Duration) MarshalYAML() (any, error) { return d.Duration.String(), nil }
 // Bare integers are interpreted as bytes. Binary units are used.
 type Bytes struct {
 	Bytes int64
+	Auto  bool
+}
+
+func (b Bytes) String() string {
+	if b.Auto {
+		return "auto"
+	}
+	return FormatBytes(b.Bytes)
 }
 
 func (b *Bytes) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.ScalarNode {
 		return fmt.Errorf("byte size must be a scalar")
+	}
+	if node.Tag == "!!str" && strings.EqualFold(strings.TrimSpace(node.Value), "auto") {
+		b.Auto = true
+		b.Bytes = 0
+		return nil
 	}
 	if node.Tag == "!!int" {
 		n, err := strconv.ParseInt(node.Value, 10, 64)
@@ -77,7 +90,78 @@ func (b *Bytes) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-func (b Bytes) MarshalYAML() (any, error) { return FormatBytes(b.Bytes), nil }
+func (b Bytes) MarshalYAML() (any, error) {
+	if b.Auto {
+		return "auto", nil
+	}
+	return FormatBytes(b.Bytes), nil
+}
+
+// Resolve returns the configured byte limit or an automatic limit derived from
+// the service cgroup. Automatic limits leave headroom for the rest of the
+// process and never fall below 256MB.
+func (b Bytes) Resolve() int64 {
+	if !b.Auto {
+		return b.Bytes
+	}
+	if limit := cgroupMemoryLimit(); limit > 0 {
+		value := int64(float64(limit) * 0.8)
+		if value < 256<<20 {
+			value = 256 << 20
+		}
+		return value
+	}
+	if total := memTotal(); total > 0 {
+		value := int64(float64(total) * 0.10)
+		if value < 256<<20 {
+			value = 256 << 20
+		}
+		if value > 4<<30 {
+			value = 4 << 30
+		}
+		return value
+	}
+	return 512 << 20
+}
+
+func cgroupMemoryLimit() int64 {
+	for _, path := range []string{
+		"/sys/fs/cgroup/memory.max",
+		"/sys/fs/cgroup/memory/memory.limit_in_bytes",
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		text := strings.TrimSpace(string(data))
+		if text == "" || strings.EqualFold(text, "max") {
+			continue
+		}
+		value, err := strconv.ParseInt(text, 10, 64)
+		if err != nil || value <= 0 || value >= 1<<60 {
+			continue
+		}
+		return value
+	}
+	return 0
+}
+
+func memTotal() int64 {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "MemTotal:" {
+			kb, err := strconv.ParseInt(fields[1], 10, 64)
+			if err == nil {
+				return kb << 10
+			}
+		}
+	}
+	return 0
+}
 
 // ParseBytes parses values such as 512MB, 1GiB, 1024.
 func ParseBytes(s string) (int64, error) {
@@ -210,9 +294,10 @@ func (c Concurrency) Effective(ready int) int {
 
 // DatabaseConfig controls the local SQLite cache.
 type DatabaseConfig struct {
-	Path          string   `yaml:"path"`
-	BusyTimeout   Duration `yaml:"busy_timeout"`
-	RetentionDays int      `yaml:"retention_days"`
+	Path               string   `yaml:"path"`
+	BusyTimeout        Duration `yaml:"busy_timeout"`
+	RetentionDays      int      `yaml:"retention_days"`
+	StaleRetentionDays int      `yaml:"stale_retention_days"`
 }
 
 // ScanConfig controls what is scanned and when.
@@ -222,6 +307,11 @@ type ScanConfig struct {
 	SizeBasis  string   `yaml:"size_basis"`
 	ExtraRoots []string `yaml:"extra_roots"`
 	Interval   Duration `yaml:"interval"`
+	// QuickInterval enables approximate sampled refreshes between exact full
+	// scans. Zero disables quick mode.
+	QuickInterval Duration `yaml:"quick_interval"`
+	// QuickSamplePercent is the percentage of files sampled by quick mode.
+	QuickSamplePercent int `yaml:"quick_sample_percent"`
 	// RequireMountPoint makes a scan fail if RootPath is not a mount target.
 	// It protects against scanning the local root filesystem when an NFS/CFS
 	// mount is missing. Off by default so ordinary local directories still work.
@@ -312,17 +402,20 @@ func DefaultForProfile(name string) *Config {
 	cfg := &Config{
 		Profile: profile,
 		Database: DatabaseConfig{
-			Path:          DefaultDBPath,
-			BusyTimeout:   Duration{5 * time.Second},
-			RetentionDays: 90,
+			Path:               DefaultDBPath,
+			BusyTimeout:        Duration{5 * time.Second},
+			RetentionDays:      90,
+			StaleRetentionDays: 7,
 		},
 		Scan: ScanConfig{
-			RootPath:          "/mnt",
-			SizeBasis:         "allocated",
-			Interval:          Duration{24 * time.Hour},
-			ScanOnStart:       true,
-			StartupDelay:      Duration{15 * time.Second},
-			ResumeInterrupted: true,
+			RootPath:           "/mnt",
+			SizeBasis:          "allocated",
+			Interval:           Duration{168 * time.Hour},
+			QuickInterval:      Duration{6 * time.Hour},
+			QuickSamplePercent: 2,
+			ScanOnStart:        true,
+			StartupDelay:       Duration{15 * time.Second},
+			ResumeInterrupted:  true,
 			Inventory: InventoryConfig{
 				Enabled:   false,
 				BatchSize: 1000,
@@ -333,7 +426,7 @@ func DefaultForProfile(name string) *Config {
 			MaxMetadataQPS:    300,
 			MinMetadataQPS:    30,
 			MaxCPUPercent:     20,
-			MemoryLimit:       Bytes{512 << 20},
+			MemoryLimit:       Bytes{Bytes: 512 << 20},
 			AdaptiveThrottle:  true,
 			LowPriority:       true,
 			SampleInterval:    Duration{5 * time.Second},
@@ -354,13 +447,13 @@ func DefaultForProfile(name string) *Config {
 		cfg.Performance.MaxMetadataQPS = 100
 		cfg.Performance.MinMetadataQPS = 10
 		cfg.Performance.MaxCPUPercent = 10
-		cfg.Performance.MemoryLimit = Bytes{256 << 20}
+		cfg.Performance.MemoryLimit = Bytes{Bytes: 256 << 20}
 	case "fast":
 		cfg.Performance.Concurrency = Concurrency{Auto: true, Max: 16}
 		cfg.Performance.MaxMetadataQPS = 1000
 		cfg.Performance.MinMetadataQPS = 100
 		cfg.Performance.MaxCPUPercent = 40
-		cfg.Performance.MemoryLimit = Bytes{1 << 30}
+		cfg.Performance.MemoryLimit = Bytes{Bytes: 1 << 30}
 		cfg.Performance.NFSSlowLatency = Duration{time.Second}
 		cfg.Performance.NFSPauseLatency = Duration{10 * time.Second}
 	}
@@ -476,6 +569,9 @@ func (c *Config) Validate() error {
 	if c.Database.RetentionDays < 1 {
 		return errors.New("database.retention_days 必须至少为 1")
 	}
+	if c.Database.StaleRetentionDays < 1 {
+		return errors.New("database.stale_retention_days 必须至少为 1")
+	}
 
 	if c.Scan.RootPath == "" {
 		return errors.New("scan.root_path 不能为空")
@@ -516,6 +612,15 @@ func (c *Config) Validate() error {
 	if c.Scan.Interval.Duration < 10*time.Second {
 		return errors.New("scan.interval 不能小于 10s")
 	}
+	if c.Scan.QuickInterval.Duration < 0 {
+		return errors.New("scan.quick_interval 不能为负数（0 表示关闭快速估算）")
+	}
+	if c.Scan.QuickInterval.Duration > 0 && c.Scan.QuickInterval.Duration < 10*time.Second {
+		return errors.New("scan.quick_interval 不能小于 10s")
+	}
+	if c.Scan.QuickSamplePercent < 0 || c.Scan.QuickSamplePercent > 100 {
+		return errors.New("scan.quick_sample_percent 必须在 0 到 100 之间")
+	}
 	if c.Scan.StartupDelay.Duration < 0 {
 		return errors.New("scan.startup_delay 不能为负数")
 	}
@@ -547,8 +652,8 @@ func (c *Config) Validate() error {
 	if p.MaxCPUPercent < 1 || p.MaxCPUPercent > 100 {
 		return errors.New("performance.max_cpu_percent 必须在 1 到 100 之间")
 	}
-	if p.MemoryLimit.Bytes < 32<<20 {
-		return errors.New("performance.memory_limit 不能小于 32MB")
+	if !p.MemoryLimit.Auto && p.MemoryLimit.Bytes < 32<<20 {
+		return errors.New("performance.memory_limit 不能小于 32MB（或设为 auto）")
 	}
 	if p.SampleInterval.Duration < time.Second {
 		return errors.New("performance.sample_interval 不能小于 1s")

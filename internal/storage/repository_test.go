@@ -42,7 +42,7 @@ func runWithDir(t *testing.T, store *Store, rootPath, name string, alloc int64, 
 	if err := store.SaveDirResult(ctx, run.ID, out); err != nil {
 		t.Fatalf("save dir: %v", err)
 	}
-	summary, err := store.CompleteRun(ctx, run.ID, false, nil)
+	summary, err := store.CompleteRun(ctx, run.ID, false, false, nil)
 	if err != nil {
 		t.Fatalf("complete run: %v", err)
 	}
@@ -104,8 +104,8 @@ func TestFailurePreservesPreviousBytes(t *testing.T) {
 	if d.LastError == "" {
 		t.Fatal("missing error")
 	}
-	if r.TotalAlloc != 4096 {
-		t.Fatalf("root total zeroed: %d", r.TotalAlloc)
+	if r.TotalAlloc != 0 {
+		t.Fatalf("failed-only root total should exclude hidden rows: %d", r.TotalAlloc)
 	}
 }
 
@@ -124,7 +124,7 @@ func TestMissingDirMarksStaleAndPreservesBytes(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CompleteRun(ctx, run.ID, false, nil); err != nil {
+	if _, err := store.CompleteRun(ctx, run.ID, false, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	r, _ := store.GetRoot(ctx, root)
@@ -135,8 +135,46 @@ func TestMissingDirMarksStaleAndPreservesBytes(t *testing.T) {
 	if d.AllocBytes != 1234 || d.DataStatus != model.DataStale {
 		t.Fatalf("missing dir not preserved: %+v", d)
 	}
-	if r.Status != model.DataPartial || r.TotalAlloc != 1244 {
+	if r.Status != model.DataPartial || r.TotalAlloc != 10 {
 		t.Fatalf("root partial state wrong: %+v", r)
+	}
+}
+
+func TestStaleDirsAreHiddenAndPrunable(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "root")
+	runWithDir(t, store, root, "alpha", 1234, nil)
+	run, err := store.StartRun(ctx, root, StartOptions{Mode: model.ModeFull, SizeBasis: model.BasisAllocated})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveDirResult(ctx, run.ID, model.DirOutcome{
+		Name: "beta", AllocBytes: 10, FileCount: 1, CompletedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteRun(ctx, run.ID, false, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := store.GetRoot(ctx, root)
+	dirs, err := store.ListDirs(ctx, r.ID, 0, model.BasisAllocated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range dirs {
+		if d.Name == "alpha" {
+			t.Fatal("stale alpha should be hidden from list")
+		}
+	}
+	if n, _ := store.CountStaleDirs(ctx, r.ID); n != 1 {
+		t.Fatalf("stale count=%d", n)
+	}
+	if _, err := store.PruneStaleDirs(ctx, r.ID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetDir(ctx, r.ID, "alpha"); err == nil {
+		t.Fatal("stale row was not pruned")
 	}
 }
 
@@ -230,7 +268,7 @@ func TestCompleteRunRejectsCanceledControl(t *testing.T) {
 	if err := store.SetControl(ctx, run.RootID, model.ControlCancel); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CompleteRun(ctx, run.ID, false, nil); !errors.Is(err, model.ErrCanceled) {
+	if _, err := store.CompleteRun(ctx, run.ID, false, false, nil); !errors.Is(err, model.ErrCanceled) {
 		t.Fatalf("expected canceled publish, got %v", err)
 	}
 	if n, err := store.CountDirs(ctx, run.RootID); err != nil || n != 0 {
@@ -252,7 +290,7 @@ func TestCompleteRunRejectsInactiveRun(t *testing.T) {
 	if err := store.AbortRun(ctx, run.ID, model.RunInterrupted, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CompleteRun(ctx, run.ID, false, nil); err == nil {
+	if _, err := store.CompleteRun(ctx, run.ID, false, false, nil); err == nil {
 		t.Fatal("expected publish to reject an interrupted run")
 	}
 	if n, err := store.CountDirs(ctx, run.RootID); err != nil || n != 0 {
@@ -317,7 +355,7 @@ func TestResumeDoesNotSkipNewerCompletedRun(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CompleteRun(ctx, second.ID, false, nil); err != nil {
+	if _, err := store.CompleteRun(ctx, second.ID, false, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	next, err := store.StartRun(ctx, root, StartOptions{Mode: model.ModeFull, Resume: true})

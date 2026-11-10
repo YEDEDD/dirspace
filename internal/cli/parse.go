@@ -16,6 +16,7 @@ type options struct {
 	json       bool
 	logical    bool
 	full       bool
+	newOnly    bool
 	resume     bool
 	once       bool
 	vacuum     bool
@@ -44,6 +45,8 @@ func parseArgs(args []string) (*options, error) {
 			opts.logical = true
 		case arg == "--full":
 			opts.full = true
+		case arg == "--new":
+			opts.newOnly = true
 		case arg == "--resume":
 			opts.resume = true
 		case arg == "--once":

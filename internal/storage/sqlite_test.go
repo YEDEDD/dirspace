@@ -22,7 +22,7 @@ func TestOpenAndEmptyRun(t *testing.T) {
 	if run.ID == 0 {
 		t.Fatal("no run id")
 	}
-	summary, err := store.CompleteRun(context.Background(), run.ID, false, nil)
+	summary, err := store.CompleteRun(context.Background(), run.ID, false, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -789,7 +789,7 @@ func (s *Store) RecoverStaleRuns(ctx context.Context, olderThan time.Duration) (
 
 // CompleteRun atomically promotes staged results into the cache. Failed
 // directories keep their previous bytes and are marked stale, never zero.
-func (s *Store) CompleteRun(ctx context.Context, runID int64, single bool, canceled func() bool) (*model.ScanSummary, error) {
+func (s *Store) CompleteRun(ctx context.Context, runID int64, single, preserveMissing bool, canceled func() bool) (*model.ScanSummary, error) {
 	now := time.Now().UTC()
 	nowMS := toMillis(now)
 	var rootID int64
@@ -873,7 +873,9 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single bool, cance
 		}
 
 		successes, failures := 0, 0
-		globalApprox := resumed != 0 || selfTransient > 0
+		globalSampled := mode == string(model.ModeQuick)
+		incremental := mode == string(model.ModeIncremental)
+		globalApprox := globalSampled || resumed != 0 || selfTransient > 0
 		hasTransient := false
 		var errorMessages []string
 		stagedNames := map[string]bool{}
@@ -909,7 +911,9 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single bool, cance
 				hasTransient = true
 			}
 			accuracy := "exact"
-			if globalApprox || d.transient > 0 {
+			if globalSampled {
+				accuracy = "sampled"
+			} else if globalApprox || d.transient > 0 {
 				accuracy = "approximate"
 			}
 			completed := d.completed
@@ -941,7 +945,7 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single bool, cance
 			}
 		}
 
-		if !single {
+		if !single && !preserveMissing {
 			for name := range existing {
 				if stagedNames[name] {
 					continue
@@ -962,7 +966,7 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single bool, cance
 				return err
 			}
 		}
-		includeSelf := !single && mode != string(model.ModeRebuild)
+		includeSelf := !single && mode != string(model.ModeRebuild) && mode != string(model.ModeIncremental)
 		if includeSelf {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM inventory
 				WHERE root_id=? AND top_dir='.' AND generation<>?`, rootID, runID); err != nil {
@@ -982,7 +986,7 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single bool, cance
 		var dirCount int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(alloc_bytes),0),
 			COALESCE(SUM(logical_bytes),0), COALESCE(SUM(file_count),0), COALESCE(SUM(dir_count),0)
-			FROM top_dirs WHERE root_id=?`, rootID).
+			FROM top_dirs WHERE root_id=? AND data_status IN ('fresh','partial')`, rootID).
 			Scan(&dirCount, &totalAlloc, &totalLogical, &totalFiles, &totalDirs); err != nil {
 			return err
 		}
@@ -992,11 +996,15 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single bool, cance
 		// The root's subdirectory count includes first-level rows themselves.
 		totalDirs += int64(dirCount)
 
-		approximate := globalApprox || hasTransient || failures > 0
+		approximate := globalApprox || incremental || hasTransient || failures > 0
 		runStatus := string(model.RunCompleted)
 		rootStatus := string(model.DataFresh)
 		rootAccuracy := model.AccuracyExact
-		if approximate {
+		if globalSampled {
+			rootAccuracy = model.AccuracySampled
+		} else if incremental && failures == 0 {
+			rootAccuracy = model.AccuracyIncremental
+		} else if approximate {
 			rootAccuracy = model.AccuracyApproximate
 		}
 		switch {
@@ -1266,7 +1274,8 @@ func (s *Store) ListDirs(ctx context.Context, rootID int64, limit int, basis mod
 	if basis == model.BasisLogical {
 		orderBy = "logical_bytes"
 	}
-	query := `SELECT ` + dirColumns + ` FROM top_dirs WHERE root_id=?
+	query := `SELECT ` + dirColumns + ` FROM top_dirs
+		WHERE root_id=? AND data_status IN ('fresh','partial')
 		ORDER BY CASE WHEN last_success_at IS NULL THEN 1 ELSE 0 END,
 		` + orderBy + ` DESC, name ASC`
 	args := []any{rootID}
@@ -1300,11 +1309,60 @@ func (s *Store) GetDir(ctx context.Context, rootID int64, name string) (*model.D
 	return d, err
 }
 
-// CountDirs counts cached rows (including failed rows without a baseline).
+// CountDirs counts visible cached rows.
 func (s *Store) CountDirs(ctx context.Context, rootID int64) (int, error) {
 	var n int
-	err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM top_dirs WHERE root_id=?`, rootID).Scan(&n)
+	err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM top_dirs
+		WHERE root_id=? AND data_status IN ('fresh','partial')`, rootID).Scan(&n)
 	return n, err
+}
+
+// CountStaleDirs counts cached rows that are no longer current, such as
+// directories removed from the filesystem.
+func (s *Store) CountStaleDirs(ctx context.Context, rootID int64) (int, error) {
+	var n int
+	err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM top_dirs
+		WHERE root_id=? AND data_status NOT IN ('fresh','partial')`, rootID).Scan(&n)
+	return n, err
+}
+
+// DirStates returns every cached directory row with its data status. It
+// includes stale rows so incremental scans can re-scan recreated directories.
+func (s *Store) DirStates(ctx context.Context, rootID int64) (map[string]string, error) {
+	rows, err := s.rdb.QueryContext(ctx, `SELECT name, data_status FROM top_dirs WHERE root_id=?`, rootID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]string)
+	for rows.Next() {
+		var name, status string
+		if err := rows.Scan(&name, &status); err != nil {
+			return nil, err
+		}
+		result[name] = status
+	}
+	return result, rows.Err()
+}
+
+// PruneStaleDirs removes old stale/failed cache rows. A zero rootID prunes all
+// roots. It never removes rows that still have fresh data.
+func (s *Store) PruneStaleDirs(ctx context.Context, rootID int64, before time.Time) (int64, error) {
+	cutoff := toMillis(before)
+	var res sql.Result
+	var err error
+	if rootID == 0 {
+		res, err = s.wdb.ExecContext(ctx, `DELETE FROM top_dirs
+			WHERE data_status IN ('stale','failed') AND COALESCE(last_attempt_at,0) < ?`, cutoff)
+	} else {
+		res, err = s.wdb.ExecContext(ctx, `DELETE FROM top_dirs
+			WHERE root_id=? AND data_status IN ('stale','failed') AND COALESCE(last_attempt_at,0) < ?`,
+			rootID, cutoff)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ---------------------------------------------------------------------------

@@ -235,6 +235,9 @@ func printStatus(w io.Writer, view *service.StatusView) {
 		fmt.Fprintf(w, "子目录数：%s\n", formatCount(dirs))
 	}
 	fmt.Fprintf(w, "缓存一级目录行数：%d\n", view.DirCount)
+	if view.StaleDirs > 0 {
+		fmt.Fprintf(w, "已删除/过期目录行：%d（已隐藏，按 stale_retention_days 清理）\n", view.StaleDirs)
+	}
 	fmt.Fprintf(w, "控制状态：%s\n", controlText(view.Control.State))
 	lastError := view.Root.LastError
 	if view.Target != nil {
@@ -251,8 +254,13 @@ func printStatus(w io.Writer, view *service.StatusView) {
 		if run.CurrentDir != "" {
 			fmt.Fprintf(w, "当前目录：%s\n", run.CurrentDir)
 		}
+		if run.ProcessedDirs > 0 && run.TotalDirs > run.ProcessedDirs {
+			elapsed := time.Since(run.StartedAt)
+			eta := time.Duration(float64(elapsed) / float64(run.ProcessedDirs) * float64(run.TotalDirs-run.ProcessedDirs))
+			fmt.Fprintf(w, "预计剩余：约 %s（按已完成目录平均）\n", formatDuration(eta))
+		}
 	}
-	if view.Last != nil {
+	if view.Last != nil && (view.Active == nil || view.Last.ID != view.Active.ID) {
 		fmt.Fprintf(w, "最近任务：#%d %s（%s），开始 %s，耗时 %s\n",
 			view.Last.ID, view.Last.Mode.Label(), runStatusText(view.Last.Status),
 			formatTimestamp(&view.Last.StartedAt), formatDuration(view.Last.Duration))

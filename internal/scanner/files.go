@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/YEDEDD/dirspace/internal/platform"
@@ -25,56 +24,6 @@ type fileScanResult struct {
 	logicalBytes  int64
 	transientErrs int64
 	err           error
-}
-
-// scanFiles processes regular-file candidates with a bounded worker pool.
-// Directory entries whose type is unknown are included as candidates too; if
-// Lstat says they are a directory, the caller recurses.
-func (s *Scanner) scanFiles(ctx context.Context, sess *scanSession, topName string, files []string) ([]fileScanResult, error) {
-	results := make([]fileScanResult, len(files))
-	if len(files) == 0 {
-		return results, nil
-	}
-	workers := sess.intraWorkers
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > len(files) {
-		workers = len(files)
-	}
-	if workers == 1 {
-		for i, path := range files {
-			results[i] = s.scanFile(ctx, sess, topName, path)
-		}
-		return results, firstFileError(results)
-	}
-
-	jobs := make(chan int, len(files))
-	for i := range files {
-		jobs <- i
-	}
-	close(jobs)
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for i := 0; i < workers; i++ {
-		go func() {
-			defer wg.Done()
-			for index := range jobs {
-				results[index] = s.scanFile(ctx, sess, topName, files[index])
-			}
-		}()
-	}
-	wg.Wait()
-	return results, firstFileError(results)
-}
-
-func firstFileError(results []fileScanResult) error {
-	for i := range results {
-		if results[i].err != nil {
-			return results[i].err
-		}
-	}
-	return nil
 }
 
 // scanFile performs one Lstat and, for a regular file, hardlink dedupe and

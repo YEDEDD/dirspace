@@ -177,11 +177,35 @@ func TestProfilesAndOverrides(t *testing.T) {
 	}
 }
 
-func TestDefaultIntervalIsDaily(t *testing.T) {
-	if got := Default().Scan.Interval.Duration; got != 24*time.Hour {
+func TestDefaultIntervalIsWeekly(t *testing.T) {
+	if got := Default().Scan.Interval.Duration; got != 168*time.Hour {
 		t.Fatalf("default interval=%v", got)
+	}
+	if got := Default().Scan.QuickInterval.Duration; got != 6*time.Hour {
+		t.Fatalf("default quick interval=%v", got)
+	}
+	if got := Default().Scan.QuickSamplePercent; got != 2 {
+		t.Fatalf("default quick sample=%d", got)
+	}
+	if got := Default().Database.StaleRetentionDays; got != 7 {
+		t.Fatalf("default stale retention=%d", got)
 	}
 	if got := Default().Performance.MaxLoad1; got != 0 {
 		t.Fatalf("default max_load1=%v", got)
+	}
+}
+
+func TestAutoMemoryLimit(t *testing.T) {
+	var wrapper struct {
+		M Bytes `yaml:"m"`
+	}
+	if err := yaml.Unmarshal([]byte("m: auto"), &wrapper); err != nil {
+		t.Fatal(err)
+	}
+	if !wrapper.M.Auto || wrapper.M.String() != "auto" {
+		t.Fatalf("auto bytes: %+v", wrapper.M)
+	}
+	if got := wrapper.M.Resolve(); got < 32<<20 {
+		t.Fatalf("resolved limit too small: %d", got)
 	}
 }

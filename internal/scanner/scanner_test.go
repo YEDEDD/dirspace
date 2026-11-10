@@ -478,3 +478,44 @@ func TestResumeDropsVanishedStagedDir(t *testing.T) {
 		t.Fatalf("beta status=%s", beta.DataStatus)
 	}
 }
+
+func TestQuickScanMarksSampledAndCountsFiles(t *testing.T) {
+	f := newScannerFixture(t)
+	for i := 0; i < 30; i++ {
+		writeFile(t, filepath.Join(f.root, "alpha", "sub", fmt.Sprintf("f%02d.bin", i)), 4096)
+	}
+	f.cfg.Scan.QuickSamplePercent = 100
+	summary, err := f.scanner.Scan(context.Background(), Request{
+		RootPath: f.root,
+		Mode:     model.ModeQuick,
+	})
+	if err != nil {
+		t.Fatalf("quick scan: %v", err)
+	}
+	if summary.Accuracy != model.AccuracySampled {
+		t.Fatalf("accuracy=%s, want sampled", summary.Accuracy)
+	}
+	if summary.TotalDirs != 1 || summary.DoneDirs != 1 || summary.FailedDirs != 0 {
+		t.Fatalf("unexpected dirs: %+v", summary)
+	}
+	root, err := f.store.GetRoot(context.Background(), f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := f.store.ListDirs(context.Background(), root.ID, 0, model.BasisAllocated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Name != "alpha" {
+		t.Fatalf("rows=%+v", rows)
+	}
+	if rows[0].FileCount != 30 {
+		t.Fatalf("file count=%d", rows[0].FileCount)
+	}
+	if rows[0].Accuracy != model.AccuracySampled {
+		t.Fatalf("row accuracy=%s", rows[0].Accuracy)
+	}
+	if rows[0].AllocBytes < 30*4096 {
+		t.Fatalf("sampled bytes too small: %d", rows[0].AllocBytes)
+	}
+}

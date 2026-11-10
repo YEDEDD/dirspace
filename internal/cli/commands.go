@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.2.1"
+var Version = "1.3.0"
 
 const (
 	exitOK      = 0
@@ -54,7 +54,7 @@ func parseCommand(positional []string) (command, error) {
 			return command{}, err
 		}
 		return command{name: name, args: rest}, nil
-	case "list", "status", "scan", "daemon", "refresh", "pause", "resume", "cancel",
+	case "list", "status", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
 		"cleanup", "backup", "doctor":
 		if len(rest) > 0 {
 			return command{}, &usageError{fmt.Sprintf("%s 不接受位置参数: %s", name, strings.Join(rest, " "))}
@@ -89,9 +89,10 @@ func validateCommandOptions(cmd command, opts *options) error {
 	allowDays := cmd.name == "cleanup"
 	allowOutput := cmd.name == "backup"
 	allowFull := cmd.name == "refresh" || cmd.name == "scan"
+	allowNew := cmd.name == "scan"
 	allowResume := cmd.name == "scan"
 	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "status" ||
-		cmd.name == "scan" || cmd.name == "refresh" || cmd.name == "rebuild" ||
+		cmd.name == "scan" || cmd.name == "quick" || cmd.name == "refresh" || cmd.name == "rebuild" ||
 		cmd.name == "pause" || cmd.name == "resume" || cmd.name == "cancel"
 	if opts.once && !allowOnce {
 		return &usageError{"--once 仅用于 daemon"}
@@ -110,6 +111,12 @@ func validateCommandOptions(cmd command, opts *options) error {
 	}
 	if opts.full && !allowFull {
 		return &usageError{"--full 仅用于 scan 或 refresh"}
+	}
+	if opts.newOnly && !allowNew {
+		return &usageError{"--new 仅用于 scan"}
+	}
+	if opts.full && opts.newOnly {
+		return &usageError{"--full 与 --new 不能同时使用"}
 	}
 	if opts.resume && !allowResume {
 		return &usageError{"--resume 仅用于 scan"}
@@ -282,6 +289,28 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 		}
 		return exitOK
 
+	case "quick":
+		setLowPriority(cfg, log)
+		progress := progressPrinter(stderr)
+		fmt.Fprintf(stderr, "开始快速估算 %s（抽样 %d%%，并发 %s，元数据上限 %d QPS）...\n",
+			queryPath, cfg.Scan.QuickSamplePercent, cfg.Performance.Concurrency, cfg.Performance.MaxMetadataQPS)
+		summary, err := svc.Scan(ctx, queryPath, service.ScanOptions{
+			Mode:     model.ModeQuick,
+			Progress: progress,
+		})
+		if summary != nil {
+			if opts.json {
+				_ = writeJSON(stdout, buildScanJSON(summary))
+			} else {
+				printScanSummary(stdout, summary)
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "快速估算失败: %v\n", err)
+			return exitRuntime
+		}
+		return exitOK
+
 	case "scan", "refresh":
 		setLowPriority(cfg, log)
 		progress := progressPrinter(stderr)
@@ -292,6 +321,11 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 		}
 		if opts.full {
 			scanOpts.Mode = model.ModeFull
+		}
+		if opts.newOnly {
+			scanOpts.Mode = model.ModeIncremental
+			scanOpts.Resume = false
+			scanOpts.ResumeCanceled = false
 		}
 		fmt.Fprintf(stderr, "开始扫描 %s（并发 %s，元数据上限 %d QPS）...\n",
 			queryPath, cfg.Performance.Concurrency, cfg.Performance.MaxMetadataQPS)
@@ -492,7 +526,10 @@ func buildConfigJSON(cfg *config.Config) map[string]any {
 		"root_path":            cfg.Scan.RootPath,
 		"database_path":        cfg.Database.Path,
 		"interval":             formatInterval(cfg.Scan.Interval.Duration),
+		"quick_interval":       formatInterval(cfg.Scan.QuickInterval.Duration),
+		"quick_sample_percent": cfg.Scan.QuickSamplePercent,
 		"retention_days":       cfg.Database.RetentionDays,
+		"stale_retention_days": cfg.Database.StaleRetentionDays,
 		"concurrency":          cfg.Performance.Concurrency.String(),
 		"concurrency_auto":     cfg.Performance.Concurrency.Auto,
 		"concurrency_max":      cfg.Performance.Concurrency.Limit(),
@@ -500,7 +537,9 @@ func buildConfigJSON(cfg *config.Config) map[string]any {
 		"start_metadata_qps":   startQPS,
 		"min_metadata_qps":     cfg.Performance.MinMetadataQPS,
 		"max_cpu_percent":      cfg.Performance.MaxCPUPercent,
-		"memory_limit":         cfg.Performance.MemoryLimit.Bytes,
+		"memory_limit":         cfg.Performance.MemoryLimit.Resolve(),
+		"memory_limit_auto":    cfg.Performance.MemoryLimit.Auto,
+		"memory_limit_config":  cfg.Performance.MemoryLimit.String(),
 		"max_host_cpu_percent": cfg.Performance.MaxHostCPUPercent,
 		"max_load1":            cfg.Performance.MaxLoad1,
 		"nfs_slow_latency":     cfg.Performance.NFSSlowLatency.Duration.String(),
@@ -521,10 +560,15 @@ func printConfig(w io.Writer, cfg *config.Config) {
 	fmt.Fprintf(w, "profile：%s\n", cfg.Profile)
 	fmt.Fprintf(w, "扫描根：%s\n", cfg.Scan.RootPath)
 	fmt.Fprintf(w, "数据库：%s\n", cfg.Database.Path)
-	fmt.Fprintf(w, "刷新间隔：%s（保留 %d 天历史）\n", formatInterval(cfg.Scan.Interval.Duration), cfg.Database.RetentionDays)
+	fmt.Fprintf(w, "精确全量间隔：%s；快速估算间隔：%s（抽样 %d%%）\n",
+		formatInterval(cfg.Scan.Interval.Duration), formatInterval(cfg.Scan.QuickInterval.Duration),
+		cfg.Scan.QuickSamplePercent)
+	fmt.Fprintf(w, "历史保留：%d 天；已删除目录保留：%d 天\n",
+		cfg.Database.RetentionDays, cfg.Database.StaleRetentionDays)
 	fmt.Fprintf(w, "并发：%s（一级目录间并行；大目录内部使用剩余并发）\n", cfg.Performance.Concurrency)
 	fmt.Fprintf(w, "QPS：%d（自适应，起步约 %d）\n", cfg.Performance.MaxMetadataQPS, startQPS(cfg))
-	fmt.Fprintf(w, "CPU：%d%%；内存：%s\n", cfg.Performance.MaxCPUPercent, config.FormatBytes(cfg.Performance.MemoryLimit.Bytes))
+	fmt.Fprintf(w, "CPU：%d%%；内存：%s（%s）\n", cfg.Performance.MaxCPUPercent,
+		config.FormatBytes(cfg.Performance.MemoryLimit.Resolve()), cfg.Performance.MemoryLimit.String())
 	fmt.Fprintf(w, "主机保护：CPU %g%%，Load1 %g（0 表示关闭）\n",
 		cfg.Performance.MaxHostCPUPercent, cfg.Performance.MaxLoad1)
 	fmt.Fprintf(w, "NFS 延迟：慢 %s，暂停 %s\n",
@@ -578,8 +622,9 @@ func printHelp(w io.Writer) {
   list                显示全部一级目录
   status              显示缓存、任务、进度和数据库状态
   config explain      显示最终生效的配置和推导值
-  scan                执行一次扫描并建立基线（默认全量）
-  refresh             执行一次刷新（当前版本为全量，保证准确性）
+  scan                执行一次精确全量扫描（默认）
+  quick               执行一次快速抽样估算（有误差，标记为 sampled）
+  refresh             执行一次精确刷新（全量，保证准确性）
   rebuild [名称]      只重新统计一个一级目录
   daemon              后台定时调度（systemd 使用）
   pause               暂停当前扫描
@@ -598,6 +643,7 @@ func printHelp(w io.Writer) {
   --json                  输出 JSON
   --logical               使用逻辑大小 st_size 展示/统计
   --full                  强制全量（scan/refresh）
+  --new                   只扫描新增或失效的一级目录（scan，需要已有基线）
   --resume                断点续扫（scan）
   --once                  只运行一轮（daemon）
   --days <N>              清理早于 N 天的历史（cleanup）
@@ -614,6 +660,8 @@ func printHelp(w io.Writer) {
   dirspace list --json
   dirspace --path /data top 10
   dirspace scan --path /data
+  dirspace scan --new --path /data
+  dirspace quick --path /data
   dirspace refresh --path /data
   dirspace rebuild --path /data/cache-a
   dirspace rebuild cache-a --path /data
@@ -621,14 +669,16 @@ func printHelp(w io.Writer) {
   dirspace backup --output /var/backups/dirspace.db
 
 默认配置:
-  profile=%s, interval=%s, retention=%d 天
+  profile=%s, exact_interval=%s, quick_interval=%s, retention=%d 天
   %s
   %s
 
 重要:
   查询命令只读 SQLite，不访问 NFS；扫描只读文件元数据，不读取文件内容。
 `, Version, config.Default().Database.RetentionDays, config.DefaultProfile,
-		formatInterval(config.Default().Scan.Interval.Duration), config.Default().Database.RetentionDays,
+		formatInterval(config.Default().Scan.Interval.Duration),
+		formatInterval(config.Default().Scan.QuickInterval.Duration),
+		config.Default().Database.RetentionDays,
 		config.DefaultConfigPath, config.DefaultDBPath)
 }
 
@@ -639,7 +689,7 @@ func validateExplicitScanRoot(command, queryPath, explicitPath, dbPath string, a
 		return nil
 	}
 	switch command {
-	case "scan", "refresh", "rebuild":
+	case "scan", "quick", "refresh", "rebuild":
 	default:
 		return nil
 	}

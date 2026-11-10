@@ -11,16 +11,26 @@ profile: normal
 
 scan:
   root_path: /mnt
-  # 每 24 小时刷新一次。每周一次可改为 168h。
-  interval: 24h
+  # 精确全量：每周一次。全量扫描较慢，但结果准确。
+  interval: 168h
+  # 快速估算：每 6 小时一次，只抽样文件元数据，有误差但很快。
+  # 设为 0 可关闭快速估算。
+  quick_interval: 6h
+  # 快速模式抽样比例。2 表示约 2% 的文件；越大越准、越慢。
+  quick_sample_percent: 2
   # 生产环境建议开启：挂载未就绪时拒绝扫描，避免误扫本地盘。
   require_mount_point: true
+
+performance:
+  # 按 cgroup 上限自动推导；systemd 单元也使用百分比，不再写死 512M。
+  memory_limit: auto
 
 # 可选高级覆盖，通常不需要填写。填写后会覆盖 profile 中的同名值：
 #
 # database:
 #   path: /var/lib/dirspace/usage.db
 #   retention_days: 90
+#   stale_retention_days: 7     # 已删除目录的缓存保留天数
 #
 # scan:
 #   size_basis: allocated       # allocated 或 logical
@@ -35,7 +45,7 @@ scan:
 #   max_metadata_qps: 300
 #   min_metadata_qps: 30
 #   max_cpu_percent: 20
-#   memory_limit: 512MB
+#   memory_limit: auto           # 按 cgroup/物理内存自动推导；也可写 512MB
 #   adaptive_throttle: true
 #   low_priority: true
 #   sample_interval: 5s

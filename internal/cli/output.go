@@ -157,9 +157,12 @@ func buildQueryJSON(svc *service.Service, view *service.View) queryJSON {
 		FileCount:         totalFiles,
 		DirCount:          totalDirs,
 		Directories:       make([]queryDirJSON, 0, len(view.Dirs)),
-		Note:              "客户端元数据快照，不代表 NFS 服务端实时占用；扫描期间文件可能变化。",
+		Note:              "客户端元数据快照，不代表共享文件系统服务端实时占用；扫描期间文件可能变化。",
 	}
 	out.HasBaseline = selectedLast != nil
+	if selectedStatus == model.DataScanning {
+		out.Note = "后台正在扫描，以下为上次已完成的缓存结果；扫描完成后自动更新。"
+	}
 	if selectedLast != nil {
 		out.AgeSeconds = int64(time.Since(*selectedLast).Seconds())
 	} else {
@@ -239,6 +242,9 @@ func printQuery(w io.Writer, svc *service.Service, view *service.View) {
 	fmt.Fprintf(w, "数据状态：%s\n", statusWithContext(selectedStatus, selectedLast))
 	fmt.Fprintf(w, "准确性：%s\n", accuracy.Label())
 	fmt.Fprintf(w, "统计口径：%s\n", view.SizeBasis.Label())
+	if selectedStatus == model.DataScanning {
+		fmt.Fprintln(w, "提示：后台正在扫描，以下为上次已完成的缓存结果；扫描完成后自动更新。")
+	}
 	totalText := formatSize(totalSelected)
 	fileText := formatCount(totalFiles)
 	dirText := formatCount(totalDirs)
@@ -273,9 +279,10 @@ func printQuery(w io.Writer, svc *service.Service, view *service.View) {
 		return
 	}
 
-	header := fmt.Sprintf("%s  %s  %s  %s  %s  %s  %s",
+	header := fmt.Sprintf("%s  %s  %s  %s  %s  %s  %s  %s",
 		padRight("排名", 4), padRight("目录名称", 40), padLeft("空间", 12),
-		padLeft("文件数", 14), padLeft("子目录", 8), padRight("统计时间", 19), "状态")
+		padLeft("文件数", 14), padLeft("子目录", 8), padLeft("耗时", 9),
+		padRight("统计时间", 19), "状态")
 	fmt.Fprintln(w, header)
 	for i, d := range view.Dirs {
 		name := truncateDisplay(validText(d.Name), 40)
@@ -291,12 +298,13 @@ func printQuery(w io.Writer, svc *service.Service, view *service.View) {
 			fileText = "n/a"
 			dirText = "n/a"
 		}
-		fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s  %s\n",
+		fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s  %s  %s\n",
 			padRight(fmt.Sprintf("%d", i+1), 4),
 			padRight(name, 40),
 			padLeft(sizeText, 12),
 			padLeft(fileText, 14),
 			padLeft(dirText, 8),
+			padLeft(formatDuration(d.Duration), 9),
 			padRight(formatTimestamp(last), 19),
 			status)
 	}

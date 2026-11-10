@@ -42,7 +42,17 @@ func (s *Scanner) scanTop(ctx context.Context, sess *scanSession, name string) (
 	if !info.IsDir() {
 		return out, fmt.Errorf("不是目录: %s", full)
 	}
-	if err := s.walkDir(ctx, sess, name, full, 0, &out); err != nil {
+	if sess.quick {
+		if err := s.walkQuickDir(ctx, sess, full, 0, &out); err != nil {
+			out.Duration = time.Since(start)
+			out.CompletedAt = time.Now()
+			return out, err
+		}
+		out.Duration = time.Since(start)
+		out.CompletedAt = time.Now()
+		return out, nil
+	}
+	if err := s.scanTree(ctx, sess, name, full, &out); err != nil {
 		out.Duration = time.Since(start)
 		out.CompletedAt = time.Now()
 		return out, err
@@ -50,115 +60,6 @@ func (s *Scanner) scanTop(ctx context.Context, sess *scanSession, name string) (
 	out.Duration = time.Since(start)
 	out.CompletedAt = time.Now()
 	return out, nil
-}
-
-func (s *Scanner) walkDir(ctx context.Context, sess *scanSession, topName, dir string, depth int, out *model.DirOutcome) error {
-	if depth > maxDepth {
-		return fmt.Errorf("目录层级超过 %d: %s", maxDepth, dir)
-	}
-	if err := sess.wait(ctx); err != nil {
-		return err
-	}
-	openStart := time.Now()
-	f, err := platform.OpenDir(dir)
-	sess.controller.ObserveMetadata(time.Since(openStart), err)
-	if err != nil {
-		if depth > 0 && errors.Is(err, os.ErrNotExist) {
-			out.TransientErrs++
-			return nil
-		}
-		return fmt.Errorf("打开目录失败 %s: %w", dir, err)
-	}
-	defer f.Close()
-	statStart := time.Now()
-	dirInfo, statErr := f.Stat()
-	sess.controller.ObserveMetadata(time.Since(statStart), statErr)
-	if statErr != nil {
-		out.TransientErrs++
-	} else if meta, ok := platform.Stat(dirInfo); ok {
-		out.AllocBytes += meta.Allocated
-		out.LogicalBytes += meta.Logical
-		sess.counters.alloc.Add(meta.Allocated)
-		sess.counters.logical.Add(meta.Logical)
-	} else {
-		out.TransientErrs++
-	}
-
-	for {
-		if err := sess.wait(ctx); err != nil {
-			return err
-		}
-		readStart := time.Now()
-		entries, readErr := f.ReadDir(readBatchSize)
-		sess.controller.ObserveMetadata(time.Since(readStart), readErr)
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			if depth > 0 && errors.Is(readErr, os.ErrNotExist) {
-				out.TransientErrs++
-				return nil
-			}
-			return fmt.Errorf("读取目录失败 %s: %w", dir, readErr)
-		}
-		var files []string
-		var dirs []string
-		for _, entry := range entries {
-			name := entry.Name()
-			path := filepath.Join(dir, name)
-			typ := entry.Type()
-			if typ&os.ModeSymlink != 0 {
-				out.SymlinkCount++
-				continue
-			}
-			if typ.IsDir() {
-				out.DirCount++
-				dirs = append(dirs, path)
-				continue
-			}
-			// DT_UNKNOWN is common on NFS; let the worker Lstat and report
-			// whether this is actually a directory.
-			files = append(files, path)
-		}
-		results, fileErr := s.scanFiles(ctx, sess, topName, files)
-		if fileErr != nil {
-			return fileErr
-		}
-		for _, res := range results {
-			if res.err != nil {
-				return res.err
-			}
-			if res.isDir {
-				out.DirCount++
-				if err := s.walkDir(ctx, sess, topName, res.path, depth+1, out); err != nil {
-					return err
-				}
-				continue
-			}
-			if res.symlink {
-				out.SymlinkCount++
-				continue
-			}
-			out.FileCount += res.fileCount
-			out.AllocBytes += res.allocBytes
-			out.LogicalBytes += res.logicalBytes
-			out.TransientErrs += res.transientErrs
-			if res.fileCount > 0 {
-				sess.counters.files.Add(res.fileCount)
-			}
-			if res.allocBytes != 0 {
-				sess.counters.alloc.Add(res.allocBytes)
-			}
-			if res.logicalBytes != 0 {
-				sess.counters.logical.Add(res.logicalBytes)
-			}
-		}
-		for _, path := range dirs {
-			if err := s.walkDir(ctx, sess, topName, path, depth+1, out); err != nil {
-				return err
-			}
-		}
-		if errors.Is(readErr, io.EOF) {
-			return nil
-		}
-	}
 }
 
 // scanRootSelf captures regular files and the directory block directly under

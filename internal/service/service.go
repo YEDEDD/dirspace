@@ -161,6 +161,7 @@ type View struct {
 	Target     *model.DirStat
 	Single     bool
 	DataStatus model.DataStatus
+	StaleDirs  int
 	SizeBasis  model.SizeBasis
 	Server     string
 	FSType     string
@@ -181,6 +182,7 @@ func (s *Service) Query(ctx context.Context, path string, limit int) (*View, err
 		view.Root = *root
 		view.ScanRoot = root.Path
 		view.Dirs = dirs
+		view.StaleDirs, _ = s.Store.CountStaleDirs(ctx, root.ID)
 		view.DataStatus = s.EffectiveStatus(root.Status, root.LastSuccessAt)
 		view.Server = mountinfo.Server(root.Path)
 		view.FSType = mountinfo.FSType(root.Path)
@@ -225,6 +227,7 @@ type StatusView struct {
 	Last       *model.Run
 	Control    model.Control
 	DirCount   int
+	StaleDirs  int
 	DataStatus model.DataStatus
 	DBPath     string
 	DBSize     int64
@@ -271,6 +274,7 @@ func (s *Service) Status(ctx context.Context, path string) (*StatusView, error) 
 	view.Last, _ = s.Store.LastRun(ctx, root.ID)
 	view.Control, _ = s.Store.GetControl(ctx, root.ID)
 	view.DirCount, _ = s.Store.CountDirs(ctx, root.ID)
+	view.StaleDirs, _ = s.Store.CountStaleDirs(ctx, root.ID)
 	view.DBSize = databaseSize(s.Store.Path())
 	view.Server = mountinfo.Server(root.Path)
 	view.FSType = mountinfo.FSType(root.Path)
@@ -355,7 +359,11 @@ func (s *Service) EffectiveStatus(current model.DataStatus, last *time.Time) mod
 	if last == nil || last.IsZero() {
 		return model.DataNever
 	}
-	if time.Since(*last) > s.Cfg.Scan.Interval.Duration {
+	freshness := s.Cfg.Scan.Interval.Duration
+	if s.Cfg.Scan.QuickInterval.Duration > 0 && s.Cfg.Scan.QuickInterval.Duration < freshness {
+		freshness = s.Cfg.Scan.QuickInterval.Duration
+	}
+	if time.Since(*last) > freshness {
 		return model.DataStale
 	}
 	return model.DataFresh

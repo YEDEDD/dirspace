@@ -180,7 +180,7 @@ func TestScanRootCannotBeSymlink(t *testing.T) {
 
 func TestEffectiveStatus(t *testing.T) {
 	f := newServiceFixture(t)
-	old := time.Now().Add(-30 * time.Hour)
+	old := time.Now().Add(-8 * 24 * time.Hour)
 	if got := f.svc.EffectiveStatus(model.DataFresh, &old); got != model.DataStale {
 		t.Fatalf("old data status=%s", got)
 	}
@@ -209,5 +209,61 @@ func TestScanRejectsDatabaseInsideRoot(t *testing.T) {
 	svc := New(store, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if _, err := svc.Scan(context.Background(), base, ScanOptions{}); err == nil {
 		t.Fatal("expected database-inside-root rejection")
+	}
+}
+
+func TestIncrementalScanOnlyAddsNewTopDirs(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 4096)
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := f.svc.Query(context.Background(), root, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := view.Dirs[0].AllocBytes
+
+	mkFile(t, filepath.Join(root, "beta", "b"), 8192)
+	summary, err := f.svc.Scan(context.Background(), root, ScanOptions{Mode: model.ModeIncremental})
+	if err != nil {
+		t.Fatalf("incremental scan: %v", err)
+	}
+	if summary.DoneDirs != 1 || summary.FailedDirs != 0 {
+		t.Fatalf("unexpected incremental summary: %+v", summary)
+	}
+	view, err = f.svc.Query(context.Background(), root, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Dirs) != 2 {
+		t.Fatalf("dirs=%+v", view.Dirs)
+	}
+	byName := map[string]model.DirStat{}
+	for _, d := range view.Dirs {
+		byName[d.Name] = d
+	}
+	if byName["alpha"].AllocBytes != before {
+		t.Fatalf("existing alpha changed: before=%d after=%d", before, byName["alpha"].AllocBytes)
+	}
+	if byName["beta"].FileCount != 1 {
+		t.Fatalf("beta not scanned: %+v", byName["beta"])
+	}
+}
+
+func TestQuickOnlyBaselineSchedulesExactOnStart(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{Mode: model.ModeQuick}); err != nil {
+		t.Fatal(err)
+	}
+	sc := f.svc.nextSchedule(context.Background(), root)
+	if sc.exact.After(time.Now().Add(2 * time.Second)) {
+		t.Fatalf("exact should be due after quick-only baseline: %s", sc.exact)
+	}
+	if sc.quick.IsZero() {
+		t.Fatal("quick schedule missing")
 	}
 }

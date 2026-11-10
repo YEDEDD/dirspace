@@ -43,6 +43,8 @@ type Accuracy string
 
 const (
 	AccuracyExact       Accuracy = "exact"
+	AccuracySampled     Accuracy = "sampled"
+	AccuracyIncremental Accuracy = "incremental"
 	AccuracyApproximate Accuracy = "approximate"
 	AccuracyUnknown     Accuracy = "unknown"
 )
@@ -51,6 +53,10 @@ func (a Accuracy) Label() string {
 	switch a {
 	case AccuracyExact:
 		return "精确（客户端元数据）"
+	case AccuracySampled:
+		return "抽样估算（非精确）"
+	case AccuracyIncremental:
+		return "近似（新增目录补扫）"
 	case AccuracyApproximate:
 		return "近似（存在错误/断点续扫）"
 	default:
@@ -63,6 +69,7 @@ type ScanMode string
 
 const (
 	ModeFull        ScanMode = "full"
+	ModeQuick       ScanMode = "quick"
 	ModeIncremental ScanMode = "incremental"
 	ModeRebuild     ScanMode = "rebuild"
 )
@@ -71,6 +78,8 @@ func (m ScanMode) Label() string {
 	switch m {
 	case ModeFull:
 		return "全量"
+	case ModeQuick:
+		return "快速估算"
 	case ModeIncremental:
 		return "增量"
 	case ModeRebuild:

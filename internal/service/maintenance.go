@@ -17,8 +17,22 @@ func (s *Service) CleanupHistory(ctx context.Context, days int, vacuum bool) (in
 	if days < 1 {
 		days = 90
 	}
+	if _, err := s.PruneStale(ctx, 0); err != nil {
+		return 0, 0, err
+	}
 	before := time.Now().AddDate(0, 0, -days)
 	return s.Store.CleanupHistory(ctx, before, vacuum)
+}
+
+// PruneStale removes old deleted/failed directory rows. It never removes a row
+// that currently has a successful baseline.
+func (s *Service) PruneStale(ctx context.Context, rootID int64) (int64, error) {
+	days := s.Cfg.Database.StaleRetentionDays
+	if days < 1 {
+		days = 7
+	}
+	before := time.Now().AddDate(0, 0, -days)
+	return s.Store.PruneStaleDirs(ctx, rootID, before)
 }
 
 // Backup writes a consistent SQLite copy to a local path.

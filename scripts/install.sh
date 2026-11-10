@@ -95,4 +95,5 @@ fi
 echo
 echo "安装完成。验证:"
 echo "  dirspace --config ${CONFIG_FILE} --path /mnt status"
+echo "  dirspace --config ${CONFIG_FILE} --path /mnt quick"
 echo "  dirspace --config ${CONFIG_FILE} --path /mnt top 10"
