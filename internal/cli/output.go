@@ -279,13 +279,19 @@ func printQuery(w io.Writer, svc *service.Service, view *service.View) {
 		return
 	}
 
+	nameWidth := 40
+	for _, d := range view.Dirs {
+		if n := displayWidth(validText(d.Name)); n > nameWidth {
+			nameWidth = n
+		}
+	}
 	header := fmt.Sprintf("%s  %s  %s  %s  %s  %s  %s  %s",
-		padRight("排名", 4), padRight("目录名称", 40), padLeft("空间", 12),
+		padRight("排名", 4), padRight("目录名称", nameWidth), padLeft("空间", 12),
 		padLeft("文件数", 14), padLeft("子目录", 8), padLeft("耗时", 9),
 		padRight("统计时间", 19), "状态")
 	fmt.Fprintln(w, header)
 	for i, d := range view.Dirs {
-		name := truncateDisplay(validText(d.Name), 40)
+		name := validText(d.Name)
 		size := dirBytes(d, view.SizeBasis)
 		last := d.LastSuccessAt
 		effective := svc.EffectiveStatus(d.DataStatus, last)
@@ -300,7 +306,7 @@ func printQuery(w io.Writer, svc *service.Service, view *service.View) {
 		}
 		fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s  %s  %s\n",
 			padRight(fmt.Sprintf("%d", i+1), 4),
-			padRight(name, 40),
+			padRight(name, nameWidth),
 			padLeft(sizeText, 12),
 			padLeft(fileText, 14),
 			padLeft(dirText, 8),
@@ -331,4 +337,123 @@ func writeJSON(w io.Writer, value any) error {
 	encoder.SetIndent("", "  ")
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(value)
+}
+
+type partialDirJSON struct {
+	Rank            int       `json:"rank"`
+	Name            string    `json:"name"`
+	SizeBytes       int64     `json:"size_bytes"`
+	SizeText        string    `json:"size_text"`
+	AllocBytes      int64     `json:"alloc_bytes"`
+	LogicalBytes    int64     `json:"logical_bytes"`
+	FileCount       int64     `json:"file_count"`
+	DirCount        int64     `json:"dir_count"`
+	SymlinkCount    int64     `json:"symlink_count"`
+	DurationSeconds float64   `json:"duration_seconds"`
+	CompletedAt     time.Time `json:"completed_at"`
+}
+
+type partialJSON struct {
+	Path          string           `json:"path"`
+	ScanRoot      string           `json:"scan_root"`
+	RunID         int64            `json:"run_id"`
+	Mode          string           `json:"mode"`
+	ModeText      string           `json:"mode_text"`
+	Status        string           `json:"status"`
+	DoneDirs      int              `json:"done_dirs"`
+	TotalDirs     int              `json:"total_dirs"`
+	FileCount     int64            `json:"file_count"`
+	TotalBytes    int64            `json:"total_bytes"`
+	CurrentDir    string           `json:"current_dir"`
+	CompletedDirs []partialDirJSON `json:"directories"`
+	Note          string           `json:"note"`
+}
+
+func buildPartialJSON(view *service.PartialView) partialJSON {
+	out := partialJSON{
+		Path: view.Path, ScanRoot: view.Root.Path,
+		CompletedDirs: make([]partialDirJSON, 0, len(view.Dirs)),
+		Note:          "staging 数据：仅包含当前任务已完成的一级目录，尚未发布到正式缓存。",
+	}
+	if view.Run != nil {
+		out.RunID = view.Run.ID
+		out.Mode = string(view.Run.Mode)
+		out.ModeText = view.Run.Mode.Label()
+		out.Status = string(view.Run.Status)
+		out.DoneDirs = view.Run.ProcessedDirs
+		out.TotalDirs = view.Run.TotalDirs
+		out.FileCount = view.Run.TotalFiles
+		out.TotalBytes = view.Run.TotalBytes
+		out.CurrentDir = view.Run.CurrentDir
+	}
+	for i, d := range view.Dirs {
+		size := dirBytes(d, view.SizeBasis)
+		entry := partialDirJSON{
+			Rank: i + 1, Name: validText(d.Name), SizeBytes: size,
+			SizeText: formatSize(size), AllocBytes: d.AllocBytes,
+			LogicalBytes: d.LogicalBytes, FileCount: d.FileCount,
+			DirCount: d.DirCount, SymlinkCount: d.SymlinkCount,
+			DurationSeconds: d.Duration.Seconds(),
+		}
+		if d.LastSuccessAt != nil {
+			entry.CompletedAt = *d.LastSuccessAt
+		}
+		out.CompletedDirs = append(out.CompletedDirs, entry)
+	}
+	return out
+}
+
+func printPartial(w io.Writer, view *service.PartialView) {
+	fmt.Fprintln(w, "dirspace 部分扫描结果")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "扫描根：%s\n", view.Root.Path)
+	if view.Run != nil {
+		elapsed := view.Run.Duration
+		if view.Run.FinishedAt == nil {
+			elapsed = time.Since(view.Run.StartedAt)
+		}
+		fmt.Fprintf(w, "当前任务：#%d %s（%s） %d/%d 目录，%s 文件，已运行 %s\n",
+			view.Run.ID, view.Run.Mode.Label(), view.Run.Status,
+			view.Run.ProcessedDirs, view.Run.TotalDirs,
+			formatCount(view.Run.TotalFiles), formatDuration(elapsed))
+		if view.Run.CurrentDir != "" {
+			fmt.Fprintf(w, "当前目录：%s\n", validText(view.Run.CurrentDir))
+		}
+	}
+	if len(view.Dirs) == 0 {
+		fmt.Fprintln(w, "暂无已完成的目录；当前目录仍在扫描，完成后会出现在这里。")
+		return
+	}
+	var totalAlloc, totalLogical, totalFiles int64
+	for _, d := range view.Dirs {
+		totalAlloc += d.AllocBytes
+		totalLogical += d.LogicalBytes
+		totalFiles += d.FileCount
+	}
+	fmt.Fprintf(w, "已完成目录：%d 个，合计 %s（逻辑 %s，文件 %s）\n",
+		len(view.Dirs), formatSize(totalAlloc), formatSize(totalLogical), formatCount(totalFiles))
+	fmt.Fprintln(w, "说明：以下为当前任务 staging 结果，尚未发布为正式缓存；快速估算的空间为抽样值。")
+	fmt.Fprintln(w)
+
+	nameWidth := 40
+	for _, d := range view.Dirs {
+		if n := displayWidth(validText(d.Name)); n > nameWidth {
+			nameWidth = n
+		}
+	}
+	fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s  %s\n",
+		padRight("排名", 4), padRight("目录名称", nameWidth), padLeft("空间", 12),
+		padLeft("文件数", 14), padLeft("子目录", 8), padLeft("耗时", 9),
+		padRight("完成时间", 19))
+	for i, d := range view.Dirs {
+		last := d.LastSuccessAt
+		fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s  %s\n",
+			padRight(fmt.Sprintf("%d", i+1), 4),
+			padRight(validText(d.Name), nameWidth),
+			padLeft(formatSize(dirBytes(d, view.SizeBasis)), 12),
+			padLeft(formatCount(d.FileCount), 14),
+			padLeft(formatCount(d.DirCount), 8),
+			padLeft(formatDuration(d.Duration), 9),
+			padRight(formatTimestamp(last), 19))
+	}
 }

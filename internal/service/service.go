@@ -234,22 +234,89 @@ func (s *Service) Query(ctx context.Context, path string, limit int) (*View, err
 	return view, nil
 }
 
+// PartialView is the in-progress staging data of a scan run. These rows are
+// deliberately separate from the published top-level cache.
+type PartialView struct {
+	Path      string
+	Root      model.Root
+	Run       *model.Run
+	Dirs      []model.DirStat
+	SizeBasis model.SizeBasis
+}
+
+// Partial returns completed first-level directories from the active run, or
+// from the latest interrupted run when no process is currently scanning.
+func (s *Service) Partial(ctx context.Context, path string, limit int) (*PartialView, error) {
+	requested, err := config.NormalizeAbsolutePath(path)
+	if err != nil {
+		return nil, err
+	}
+	root, err := s.Store.GetRoot(ctx, requested)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, &NotScannedError{Path: requested}
+		}
+		return nil, err
+	}
+	run, err := s.Store.ActiveRun(ctx, root.ID)
+	if errors.Is(err, storage.ErrNotFound) {
+		latest, lastErr := s.Store.LastRun(ctx, root.ID)
+		if lastErr != nil {
+			if errors.Is(lastErr, storage.ErrNotFound) {
+				return nil, fmt.Errorf("当前没有扫描任务；请先执行 dirspace scan")
+			}
+			return nil, lastErr
+		}
+		switch latest.Status {
+		case model.RunRunning, model.RunPaused, model.RunInterrupted:
+			run = latest
+		default:
+			return nil, fmt.Errorf("当前没有进行中的扫描；已完成的结果请用 dirspace top 查看")
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	dirs, err := s.Store.StagedDirs(ctx, run.ID, limit, s.sizeBasis())
+	if err != nil {
+		return nil, err
+	}
+	accuracy := model.AccuracyExact
+	switch run.Mode {
+	case model.ModeQuick:
+		accuracy = model.AccuracySampled
+	case model.ModeIncremental:
+		accuracy = model.AccuracyIncremental
+	}
+	for i := range dirs {
+		dirs[i].RootID = root.ID
+		dirs[i].DataStatus = model.DataFresh
+		dirs[i].Accuracy = accuracy
+	}
+	return &PartialView{
+		Path: requested, Root: *root, Run: run, Dirs: dirs,
+		SizeBasis: s.sizeBasis(),
+	}, nil
+}
+
 // StatusView is the read-only state summary shown by "status".
 type StatusView struct {
-	Path       string
-	Root       model.Root
-	Target     *model.DirStat
-	Active     *model.Run
-	Last       *model.Run
-	Control    model.Control
-	DirCount   int
-	StaleDirs  int
-	DataStatus model.DataStatus
-	DBPath     string
-	DBSize     int64
-	Server     string
-	FSType     string
-	SizeBasis  model.SizeBasis
+	Path              string
+	Root              model.Root
+	Target            *model.DirStat
+	Active            *model.Run
+	Last              *model.Run
+	Control           model.Control
+	DirCount          int
+	StaleDirs         int
+	ActiveDoneAlloc   int64
+	ActiveDoneLogical int64
+	ActiveDoneDirs    int
+	DataStatus        model.DataStatus
+	DBPath            string
+	DBSize            int64
+	Server            string
+	FSType            string
+	SizeBasis         model.SizeBasis
 }
 
 // Status reads only local database and mount table state.
@@ -291,6 +358,15 @@ func (s *Service) Status(ctx context.Context, path string) (*StatusView, error) 
 		SizeBasis: s.sizeBasis(),
 	}
 	view.Active, _ = s.Store.ActiveRun(ctx, root.ID)
+	if view.Active != nil {
+		if staged, stagedErr := s.Store.StagedDirs(ctx, view.Active.ID, 0, model.BasisAllocated); stagedErr == nil {
+			for _, d := range staged {
+				view.ActiveDoneAlloc += d.AllocBytes
+				view.ActiveDoneLogical += d.LogicalBytes
+				view.ActiveDoneDirs++
+			}
+		}
+	}
 	view.Last, _ = s.Store.LastRun(ctx, root.ID)
 	view.Control, _ = s.Store.GetControl(ctx, root.ID)
 	view.DirCount, _ = s.Store.CountDirs(ctx, root.ID)

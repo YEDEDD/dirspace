@@ -241,8 +241,14 @@ func (s *Scanner) walkQuickDir(ctx context.Context, sess *scanSession, dir strin
 		// Scale only this directory's files. out.FileCount also contains
 		// recursively counted children, which have already been estimated by
 		// their own walkQuickDir call.
-		out.AllocBytes += scaleSample(sampledAlloc, int64(sampledFiles), int64(fileSeen))
-		out.LogicalBytes += scaleSample(sampledLogical, int64(sampledFiles), int64(fileSeen))
+		allocEstimate := scaleSample(sampledAlloc, int64(sampledFiles), int64(fileSeen))
+		logicalEstimate := scaleSample(sampledLogical, int64(sampledFiles), int64(fileSeen))
+		out.AllocBytes += allocEstimate
+		out.LogicalBytes += logicalEstimate
+		// Counters drive the live "status" totals. Sampled file bytes are not
+		// added while walking, so add the scaled estimate here exactly once.
+		sess.counters.alloc.Add(allocEstimate)
+		sess.counters.logical.Add(logicalEstimate)
 	}
 	return nil
 }

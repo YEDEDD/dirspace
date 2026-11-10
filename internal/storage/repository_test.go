@@ -561,3 +561,31 @@ func TestActiveRunIgnoresStaleHeartbeat(t *testing.T) {
 		t.Fatalf("stale active run should not be live: %v", err)
 	}
 }
+
+func TestStagedDirsReturnsPartialRows(t *testing.T) {
+	store := testStore(t)
+	root := filepath.Join(t.TempDir(), "partial-root")
+	run, err := store.StartRun(context.Background(), root, StartOptions{
+		Mode: model.ModeQuick, SizeBasis: model.BasisAllocated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	longName := "turing-data-etcd-2-pvc-4c25346d-d5c0-4876-b39e-02174655b88e"
+	if err := store.SaveDirResult(context.Background(), run.ID, model.DirOutcome{
+		Name: longName, AllocBytes: 7 << 40, FileCount: 12, DirCount: 3,
+		CompletedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.StagedDirs(context.Background(), run.ID, 10, model.BasisAllocated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Name != longName {
+		t.Fatalf("rows=%+v", rows)
+	}
+	if rows[0].AllocBytes != 7<<40 || rows[0].FileCount != 12 {
+		t.Fatalf("unexpected staged row: %+v", rows[0])
+	}
+}

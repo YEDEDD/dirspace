@@ -68,6 +68,8 @@ type statusJSON struct {
 	DBPath            string     `json:"database_path"`
 	DBSize            int64      `json:"database_size_bytes"`
 	ActiveRun         *runJSON   `json:"active_run,omitempty"`
+	ActiveDoneBytes   int64      `json:"active_done_bytes,omitempty"`
+	ActiveDoneDirs    int        `json:"active_done_directories,omitempty"`
 	LastRun           *runJSON   `json:"last_run,omitempty"`
 	Control           string     `json:"control_state"`
 	ControlText       string     `json:"control_state_text"`
@@ -173,6 +175,8 @@ func buildStatusJSON(view *service.StatusView) statusJSON {
 		DBPath:            view.DBPath,
 		DBSize:            view.DBSize,
 		ActiveRun:         toRunJSON(view.Active),
+		ActiveDoneBytes:   view.ActiveDoneAlloc,
+		ActiveDoneDirs:    view.ActiveDoneDirs,
 		LastRun:           toRunJSON(view.Last),
 		Control:           string(view.Control.State),
 		ControlText:       controlText(view.Control.State),
@@ -249,9 +253,13 @@ func printStatus(w io.Writer, view *service.StatusView) {
 	if view.Active != nil {
 		run := view.Active
 		elapsed := time.Since(run.StartedAt)
-		fmt.Fprintf(w, "当前任务：#%d %s（%s） %d/%d 目录，%s 文件，%s，已运行 %s\n",
+		doneBytes := view.ActiveDoneAlloc
+		if view.SizeBasis == model.BasisLogical {
+			doneBytes = view.ActiveDoneLogical
+		}
+		fmt.Fprintf(w, "当前任务：#%d %s（%s） %d/%d 目录，%s 文件，已完成目录 %s，已运行 %s\n",
 			run.ID, run.Mode.Label(), runStatusText(run.Status), run.ProcessedDirs,
-			run.TotalDirs, formatCount(run.TotalFiles), formatSize(run.TotalBytes),
+			run.TotalDirs, formatCount(run.TotalFiles), formatSize(doneBytes),
 			formatDuration(elapsed))
 		if run.CurrentDir != "" {
 			fmt.Fprintf(w, "当前目录：%s\n", run.CurrentDir)

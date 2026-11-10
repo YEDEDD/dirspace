@@ -49,7 +49,8 @@ dirspace config explain       # 先看最终配置、挂载和自动推导值
 dirspace quick                # 先跑快速估算，几分钟到几小时出近似结果
 dirspace scan                 # 再跑精确全量，建立准确基线
 dirspace top 20               # 查询只读 SQLite
-dirspace status               # 进度、ETA、慢目录、数据库
+dirspace partial              # 扫描中查看已完成目录（staging，完整名称）
+dirspace status               # 进度、ETA、已完成目录合计、数据库
 ```
 
 `quick` 和 `scan` 都可以加 `--path /真实挂载点`。不写时使用 `scan.root_path`。
@@ -148,6 +149,7 @@ profile 只是基线，`performance` 下的字段可以覆盖它。三个 profil
 
 - 扫描时发现目录已删除，旧行标记为 `stale`，不会立刻删除，避免短暂挂载异常造成数据丢失
 - `top` / `list` 默认隐藏 `stale` 行，`status` 会显示隐藏行数
+- 扫描进行中，顶层结果还在 staging；用 `partial` 查看已完成目录，整轮完成后才发布到 `top/list`
 - `database.stale_retention_days` 默认 7 天，daemon 每次扫描后自动清理
 - `database.retention_days` 默认 90 天，控制历史统计
 
@@ -243,8 +245,9 @@ sudo systemctl daemon-reload
 | 命令 | 作用 |
 |---|---|
 | `dirspace` / `dirspace top 20` | 一级目录空间排名，显示数据时间、状态、耗时 |
-| `dirspace list` | 全部可见一级目录 |
-| `dirspace status` | 缓存、当前任务、预计剩余、隐藏 stale 行、数据库 |
+| `dirspace list` | 全部可见一级目录（完整名称） |
+| `dirspace partial` | 当前扫描已完成的 staging 目录、完整名称、合计空间 |
+| `dirspace status` | 缓存、当前任务、已完成目录合计、预计剩余、隐藏 stale 行、数据库 |
 | `dirspace config explain` | 最终生效配置和自动推导值 |
 | `dirspace quick` | 快速抽样估算，标记 `sampled` |
 | `dirspace scan` | 精确全量扫描 |

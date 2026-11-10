@@ -1466,3 +1466,43 @@ func resumableRunStatus(status model.RunStatus, includeCanceled bool) bool {
 		return false
 	}
 }
+
+// StagedDirs returns the completed first-level directories of one run. These
+// rows are still staging data: they are visible through "partial" but not yet
+// published to top_dirs.
+func (s *Store) StagedDirs(ctx context.Context, runID int64, limit int, basis model.SizeBasis) ([]model.DirStat, error) {
+	orderBy := "alloc_bytes"
+	if basis == model.BasisLogical {
+		orderBy = "logical_bytes"
+	}
+	query := `SELECT name, alloc_bytes, logical_bytes, file_count, dir_count,
+		symlink_count, duration_ms, completed_at
+		FROM run_dirs WHERE run_id=? AND error='' ORDER BY ` + orderBy + ` DESC, name ASC`
+	args := []any{runID}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []model.DirStat
+	for rows.Next() {
+		var d model.DirStat
+		var durationMS, completedMS int64
+		if err := rows.Scan(&d.Name, &d.AllocBytes, &d.LogicalBytes, &d.FileCount,
+			&d.DirCount, &d.SymlinkCount, &durationMS, &completedMS); err != nil {
+			return nil, err
+		}
+		d.ID = runID
+		d.Duration = time.Duration(durationMS) * time.Millisecond
+		t := time.UnixMilli(completedMS)
+		d.LastSuccessAt = &t
+		d.LastAttemptAt = &t
+		d.DataStatus = model.DataFresh
+		result = append(result, d)
+	}
+	return result, rows.Err()
+}

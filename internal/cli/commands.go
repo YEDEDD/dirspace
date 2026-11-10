@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.3.3"
+var Version = "1.3.4"
 
 const (
 	exitOK      = 0
@@ -54,7 +54,7 @@ func parseCommand(positional []string) (command, error) {
 			return command{}, err
 		}
 		return command{name: name, args: rest}, nil
-	case "list", "status", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
+	case "list", "partial", "status", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
 		"cleanup", "backup", "doctor":
 		if len(rest) > 0 {
 			return command{}, &usageError{fmt.Sprintf("%s 不接受位置参数: %s", name, strings.Join(rest, " "))}
@@ -91,7 +91,7 @@ func validateCommandOptions(cmd command, opts *options) error {
 	allowFull := cmd.name == "refresh" || cmd.name == "scan"
 	allowNew := cmd.name == "scan"
 	allowResume := cmd.name == "scan"
-	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "status" ||
+	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "partial" || cmd.name == "status" ||
 		cmd.name == "scan" || cmd.name == "quick" || cmd.name == "refresh" || cmd.name == "rebuild" ||
 		cmd.name == "pause" || cmd.name == "resume" || cmd.name == "cancel"
 	if opts.once && !allowOnce {
@@ -269,6 +269,22 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 			}
 		} else {
 			printQuery(stdout, svc, view)
+		}
+		return exitOK
+
+	case "partial":
+		view, err := svc.Partial(ctx, queryPath, 0)
+		if err != nil {
+			printError(stderr, err)
+			return exitRuntime
+		}
+		if opts.json {
+			if err := writeJSON(stdout, buildPartialJSON(view)); err != nil {
+				fmt.Fprintf(stderr, "输出 JSON 失败: %v\n", err)
+				return exitRuntime
+			}
+		} else {
+			printPartial(stdout, view)
 		}
 		return exitOK
 
@@ -620,6 +636,7 @@ func printHelp(w io.Writer) {
   （无命令）          等同于 top 10
   top <N>             显示空间排名前 N 个一级目录（默认 10）
   list                显示全部一级目录
+  partial             显示当前扫描已完成的一级目录（staging，含完整名称）
   status              显示缓存、任务、进度和数据库状态
   config explain      显示最终生效的配置和推导值
   scan                执行一次精确全量扫描（默认）
@@ -658,6 +675,7 @@ func printHelp(w io.Writer) {
   dirspace
   dirspace top 20
   dirspace list --json
+  dirspace partial --path /mnt
   dirspace --path /data top 10
   dirspace scan --path /data
   dirspace scan --new --path /data

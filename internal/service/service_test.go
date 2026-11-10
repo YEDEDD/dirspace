@@ -341,3 +341,35 @@ func TestQuickRefusesWhileExactIsActive(t *testing.T) {
 		t.Fatal("quick scan should be refused while exact is active")
 	}
 }
+
+func TestPartialReturnsCompleteStagedNames(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	run, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeQuick, SizeBasis: model.BasisAllocated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	longName := "turing-data-etcd-2-pvc-4c25346d-d5c0-4876-b39e-02174655b88e"
+	if err := f.store.SaveDirResult(context.Background(), run.ID, model.DirOutcome{
+		Name: longName, AllocBytes: 7 << 40, FileCount: 42, DirCount: 3,
+		CompletedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := f.svc.Partial(context.Background(), root, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Run == nil || view.Run.ID != run.ID {
+		t.Fatalf("unexpected run: %+v", view.Run)
+	}
+	if len(view.Dirs) != 1 || view.Dirs[0].Name != longName {
+		t.Fatalf("partial dirs: %+v", view.Dirs)
+	}
+	if view.Dirs[0].AllocBytes != 7<<40 {
+		t.Fatalf("partial bytes: %+v", view.Dirs[0])
+	}
+}

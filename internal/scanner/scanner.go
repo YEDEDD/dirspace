@@ -463,6 +463,16 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 			return summary, targetErr
 		}
 	}
+	if req.Progress != nil {
+		req.Progress(model.Progress{
+			RootPath:  rootPath,
+			TotalDirs: summary.TotalDirs,
+			DoneDirs:  summary.DoneDirs,
+			Files:     summary.FileCount,
+			Bytes:     summary.TotalAlloc,
+			Elapsed:   summary.Duration,
+		})
+	}
 	s.log.Info("扫描完成", "root", rootPath, "status", summary.DataStatus,
 		"accuracy", summary.Accuracy, "dirs", summary.TotalDirs,
 		"failed", summary.FailedDirs, "bytes", summary.TotalAlloc,

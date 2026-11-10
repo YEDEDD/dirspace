@@ -485,9 +485,11 @@ func TestQuickScanMarksSampledAndCountsFiles(t *testing.T) {
 		writeFile(t, filepath.Join(f.root, "alpha", "sub", fmt.Sprintf("f%02d.bin", i)), 4096)
 	}
 	f.cfg.Scan.QuickSamplePercent = 100
+	var lastProgress model.Progress
 	summary, err := f.scanner.Scan(context.Background(), Request{
 		RootPath: f.root,
 		Mode:     model.ModeQuick,
+		Progress: func(p model.Progress) { lastProgress = p },
 	})
 	if err != nil {
 		t.Fatalf("quick scan: %v", err)
@@ -517,5 +519,11 @@ func TestQuickScanMarksSampledAndCountsFiles(t *testing.T) {
 	}
 	if rows[0].AllocBytes < 30*4096 {
 		t.Fatalf("sampled bytes too small: %d", rows[0].AllocBytes)
+	}
+	if lastProgress.Bytes < 30*4096 {
+		t.Fatalf("quick progress undercounts bytes: %d", lastProgress.Bytes)
+	}
+	if lastProgress.Bytes != summary.TotalAlloc {
+		t.Fatalf("progress bytes=%d, summary total=%d", lastProgress.Bytes, summary.TotalAlloc)
 	}
 }
