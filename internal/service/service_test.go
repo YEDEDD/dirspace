@@ -328,6 +328,127 @@ func TestInterruptedExactSchedulesResumeBeforeQuick(t *testing.T) {
 	}
 }
 
+func TestQuickResumeKeepsCompletedDirs(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	f.cfg.Scan.QuickSamplePercent = 100
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	mkFile(t, filepath.Join(root, "beta", "b"), 2048)
+
+	run, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeQuick, SizeBasis: model.BasisAllocated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SaveDirResult(context.Background(), run.ID, model.DirOutcome{
+		Name: "alpha", AllocBytes: 4096, FileCount: 1, DirCount: 0,
+		CompletedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AbortRun(context.Background(), run.ID, model.RunInterrupted, "test restart"); err != nil {
+		t.Fatal(err)
+	}
+	// If alpha were rescanned, this extra file would appear in the summary.
+	mkFile(t, filepath.Join(root, "alpha", "extra"), 8192)
+
+	summary, err := f.svc.Scan(context.Background(), root, ScanOptions{
+		Mode: model.ModeQuick, Resume: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !summary.Resumed || summary.RunID != run.ID {
+		t.Fatalf("quick run was not resumed: %+v", summary)
+	}
+	if summary.TotalDirs != 2 || summary.DoneDirs != 2 {
+		t.Fatalf("unexpected dirs: total=%d done=%d", summary.TotalDirs, summary.DoneDirs)
+	}
+	if summary.FileCount != 2 {
+		t.Fatalf("completed alpha was rescanned: files=%d want=2", summary.FileCount)
+	}
+}
+
+func TestNewestQuickResumeNotBlockedByOlderExact(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	f.cfg.Scan.QuickSamplePercent = 100
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	mkFile(t, filepath.Join(root, "beta", "b"), 2048)
+
+	exact, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeFull, SizeBasis: model.BasisAllocated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SaveDirResult(context.Background(), exact.ID, model.DirOutcome{
+		Name: "alpha", AllocBytes: 1024, FileCount: 1, CompletedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AbortRun(context.Background(), exact.ID, model.RunInterrupted, "old exact"); err != nil {
+		t.Fatal(err)
+	}
+
+	quick, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeQuick, SizeBasis: model.BasisAllocated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SaveDirResult(context.Background(), quick.ID, model.DirOutcome{
+		Name: "beta", AllocBytes: 2048, FileCount: 1, CompletedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AbortRun(context.Background(), quick.ID, model.RunInterrupted, "new quick"); err != nil {
+		t.Fatal(err)
+	}
+
+	sc := f.svc.nextSchedule(context.Background(), root)
+	if sc.quick.After(time.Now().Add(2 * time.Second)) {
+		t.Fatalf("newest quick run not scheduled for resume: %s", sc.quick)
+	}
+	summary, err := f.svc.Scan(context.Background(), root, ScanOptions{
+		Mode: model.ModeQuick, Resume: true,
+	})
+	if err != nil {
+		t.Fatalf("newest quick run should not be blocked by an older exact run: %v", err)
+	}
+	if !summary.Resumed || summary.RunID != quick.ID {
+		t.Fatalf("wrong run resumed: %+v", summary)
+	}
+}
+
+func TestInterruptedQuickSchedulesQuickResume(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{Mode: model.ModeFull}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeQuick, SizeBasis: model.BasisAllocated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SaveDirResult(context.Background(), run.ID, model.DirOutcome{
+		Name: "alpha", AllocBytes: 1024, FileCount: 1, CompletedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AbortRun(context.Background(), run.ID, model.RunInterrupted, "test restart"); err != nil {
+		t.Fatal(err)
+	}
+	sc := f.svc.nextSchedule(context.Background(), root)
+	if sc.quick.After(time.Now().Add(2 * time.Second)) {
+		t.Fatalf("interrupted quick not scheduled for resume: %s", sc.quick)
+	}
+}
+
 func TestQuickRefusesWhileExactIsActive(t *testing.T) {
 	f := newServiceFixture(t)
 	root := f.cfg.Scan.RootPath

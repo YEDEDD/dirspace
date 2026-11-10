@@ -426,11 +426,15 @@ func (s *Store) StartRun(ctx context.Context, rootPath string, opts StartOptions
 			// completed/failed run and resuming an older one could publish stale
 			// staging after a newer successful scan.
 			var existing int64
-			var existingStatus string
-			err := tx.QueryRowContext(ctx, `SELECT id, status FROM scan_runs
+			var existingStatus, existingMode string
+			err := tx.QueryRowContext(ctx, `SELECT id, status, mode FROM scan_runs
 				WHERE root_id=? AND size_basis=? ORDER BY id DESC LIMIT 1`, rootID, string(opts.SizeBasis)).
-				Scan(&existing, &existingStatus)
-			if err == nil && resumableRunStatus(model.RunStatus(existingStatus), opts.ResumeCanceled) {
+				Scan(&existing, &existingStatus, &existingMode)
+			// A run may only be resumed by the same scan mode. Resuming a quick
+			// staging row as a full scan (or vice versa) would publish sampled
+			// numbers as exact, and the newest run is the only safe resume point.
+			if err == nil && existingMode == string(opts.Mode) &&
+				resumableRunStatus(model.RunStatus(existingStatus), opts.ResumeCanceled) {
 				runID = existing
 				if _, err := tx.ExecContext(ctx, `UPDATE scan_runs SET status='running', resumed=1,
 					heartbeat_at=?, finished_at=NULL, error='' WHERE id=?`, now, runID); err != nil {

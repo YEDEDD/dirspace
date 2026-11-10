@@ -175,10 +175,11 @@ database:
 ## 重启、替换二进制与续扫
 
 - **只替换二进制文件**：Linux 上正在运行的进程继续使用旧 inode，当前扫描不受影响；之后执行的 `dirspace status/top` 已经是新二进制，可以正常读 SQLite。
-- **`systemctl restart`**：旧进程收到 SIGTERM，当前精确扫描会中断，未完成的一级目录不会发布；已完成目录的 staging 会保留。
-- 新进程启动时，如果最新精确任务处于 `interrupted/running/paused`，会**先恢复精确扫描，再安排快速估算**；不会让 quick 先把 staging 冲掉。
-- 恢复需要 `scan.resume_interrupted: true`（默认 true），并且配置、数据库和扫描根保持一致。
-- 进程被 `SIGKILL` 或异常退出时，90 秒没有心跳后会被标记为中断，下一次精确扫描会尝试续扫。
+- **`systemctl restart`**：旧进程收到 SIGTERM，当前扫描会中断，未完成的一级目录不会发布；已完成目录的 staging 会保留。
+- 新进程启动时，如果最新**精确**任务处于 `interrupted/running/paused`，会先恢复精确扫描，再安排快速估算；如果只有最新**快速**任务处于这些状态，会先恢复快速估算。
+- 快速续扫会读取已完成的 `run_dirs`，跳过这些一级目录，只重扫中断时正在处理的目录；不会再创建新 quick 清空 staging。
+- 恢复需要 `scan.resume_interrupted: true`（默认 true），并且配置、数据库和扫描根保持一致；精确和快速只恢复各自模式的最新任务，不会把 sampled 结果当 exact 发布。
+- 进程被 `SIGKILL` 或异常退出时，90 秒没有心跳后会被标记为中断，下一次对应模式的扫描会尝试续扫。
 - 精确扫描进行中，手动 `quick` 会被拒绝，避免覆盖 staging。
 
 ### 从旧 mnt-usage 升级

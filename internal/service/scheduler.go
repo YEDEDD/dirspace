@@ -139,8 +139,11 @@ func (s *Service) runScheduledRoot(ctx context.Context, root string, mode model.
 			"files", p.Files, "bytes", p.Bytes, "elapsed", p.Elapsed.Round(time.Second).String())
 	}
 	summary, err := s.Scan(ctx, root, ScanOptions{
-		Mode:           mode,
-		Resume:         mode != model.ModeQuick && s.Cfg.Scan.ResumeInterrupted,
+		Mode: mode,
+		// Both quick and exact staging are durable. A daemon restart must
+		// resume the unfinished run of this mode instead of starting a fresh
+		// quick that would delete every completed first-level row.
+		Resume:         s.Cfg.Scan.ResumeInterrupted,
 		ResumeCanceled: false, // a user cancel is not an abnormal exit
 		Progress:       progress,
 	})
@@ -184,18 +187,24 @@ func (s *Service) nextSchedule(ctx context.Context, rootPath string) scanSchedul
 		}
 		return sc
 	}
-	// A daemon restart must resume an unfinished exact run before any quick
-	// estimate. Quick StartRun invalidates staging; starting it first would
-	// throw away all completed top-level directories. This also prevents an
-	// interrupted exact run from being pushed a full interval into the future.
-	if latest, runErr := s.Store.LastRunByMode(ctx, root.ID, model.ModeFull); runErr == nil && latest != nil {
+	// Resume the newest unfinished run first. Older interrupted runs must not
+	// preempt a newer quick run just because they are exact: with quick resume
+	// implemented, continuing the newest work preserves the most staging and
+	// avoids starting an exact scan that would invalidate that staging.
+	quickInterrupted := false
+	if latest, runErr := s.Store.LastRun(ctx, root.ID); runErr == nil && latest != nil {
 		switch latest.Status {
 		case model.RunInterrupted, model.RunRunning, model.RunPaused:
-			sc.exact = now
-			if s.Cfg.Scan.QuickInterval.Duration > 0 {
-				sc.quick = now.Add(s.Cfg.Scan.QuickInterval.Duration)
+			if latest.Mode == model.ModeFull {
+				sc.exact = now
+				if s.Cfg.Scan.QuickInterval.Duration > 0 {
+					sc.quick = now.Add(s.Cfg.Scan.QuickInterval.Duration)
+				}
+				return sc
 			}
-			return sc
+			if latest.Mode == model.ModeQuick {
+				quickInterrupted = true
+			}
 		}
 	}
 	if root.LastSuccessAt == nil && s.Cfg.Scan.ScanOnStart {
@@ -234,6 +243,14 @@ func (s *Service) nextSchedule(ctx context.Context, rootPath string) scanSchedul
 				sc.quick = now
 			}
 		}
+	}
+	// An interrupted quick run must be resumed promptly, even when the next
+	// exact scan is still in the future. The resume path reuses completed
+	// first-level rows and only scans the directory that was interrupted.
+	// This must come after the normal quick interval calculation because an
+	// interrupted run also has finished_at set.
+	if quickInterrupted && s.Cfg.Scan.QuickInterval.Duration > 0 {
+		sc.quick = now
 	}
 	return sc
 }

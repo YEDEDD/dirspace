@@ -88,7 +88,11 @@ func (s *Service) Scan(ctx context.Context, path string, opts ScanOptions) (*mod
 				return nil, fmt.Errorf("精确扫描正在进行（#%d），请等它完成后再执行快速估算", active.ID)
 			}
 			if s.Cfg.Scan.ResumeInterrupted {
-				if latest, runErr := s.Store.LastRunByMode(ctx, root.ID, model.ModeFull); runErr == nil && latest != nil {
+				// Only the newest run may block a quick scan. An older
+				// interrupted exact run must not block resuming a newer quick
+				// run; the daemon resumes the newest run first.
+				if latest, runErr := s.Store.LastRun(ctx, root.ID); runErr == nil && latest != nil &&
+					latest.Mode == model.ModeFull {
 					switch latest.Status {
 					case model.RunInterrupted, model.RunRunning, model.RunPaused:
 						return nil, fmt.Errorf("有未完成的精确扫描（#%d），请先执行 dirspace scan --resume 续扫", latest.ID)

@@ -257,6 +257,38 @@ func TestResumeStaging(t *testing.T) {
 	}
 }
 
+func TestResumeRequiresSameScanMode(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "root")
+	quick, err := store.StartRun(ctx, root, StartOptions{Mode: model.ModeQuick})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveDirResult(ctx, quick.ID, model.DirOutcome{
+		Name: "alpha", AllocBytes: 100, FileCount: 1, CompletedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AbortRun(ctx, quick.ID, model.RunInterrupted, "test interrupt"); err != nil {
+		t.Fatal(err)
+	}
+	full, err := store.StartRun(ctx, root, StartOptions{Mode: model.ModeFull, Resume: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.Resumed || full.ID == quick.ID || full.Mode != model.ModeFull {
+		t.Fatalf("quick staging must not be resumed as a full scan: %+v", full)
+	}
+	completed, err := store.CompletedDirs(ctx, full.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completed) != 0 {
+		t.Fatalf("new mode reused staging from another mode: %+v", completed)
+	}
+}
+
 func TestCompleteRunRejectsCanceledControl(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
