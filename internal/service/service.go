@@ -183,7 +183,13 @@ func (s *Service) Query(ctx context.Context, path string, limit int) (*View, err
 		view.ScanRoot = root.Path
 		view.Dirs = dirs
 		view.StaleDirs, _ = s.Store.CountStaleDirs(ctx, root.ID)
-		view.DataStatus = s.EffectiveStatus(root.Status, root.LastSuccessAt)
+		status := root.Status
+		if status == model.DataScanning {
+			if _, activeErr := s.Store.ActiveRun(ctx, root.ID); errors.Is(activeErr, storage.ErrNotFound) {
+				status = model.DataFresh
+			}
+		}
+		view.DataStatus = s.EffectiveStatus(status, root.LastSuccessAt)
 		view.Server = mountinfo.Server(root.Path)
 		view.FSType = mountinfo.FSType(root.Path)
 		return view, nil
@@ -238,6 +244,10 @@ type StatusView struct {
 
 // Status reads only local database and mount table state.
 func (s *Service) Status(ctx context.Context, path string) (*StatusView, error) {
+	// Status is also the operator's recovery command: a killed foreground
+	// scanner leaves a running row behind, and the next status should not keep
+	// showing it as live forever.
+	s.Recover(ctx)
 	requested, err := config.NormalizeAbsolutePath(path)
 	if err != nil {
 		return nil, err

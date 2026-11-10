@@ -544,3 +544,20 @@ func TestAddInventoryBatchChunks(t *testing.T) {
 		t.Fatalf("rows=%d", n)
 	}
 }
+
+func TestActiveRunIgnoresStaleHeartbeat(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "root")
+	run, err := store.StartRun(ctx, root, StartOptions{Mode: model.ModeFull, SizeBasis: model.BasisAllocated})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-5 * time.Minute).UnixMilli()
+	if _, err := store.wdb.ExecContext(ctx, `UPDATE scan_runs SET heartbeat_at=? WHERE id=?`, old, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ActiveRun(ctx, run.RootID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale active run should not be live: %v", err)
+	}
+}

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"log/slog"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/YEDEDD/dirspace/internal/config"
 	"github.com/YEDEDD/dirspace/internal/model"
 	"github.com/YEDEDD/dirspace/internal/storage"
+	_ "modernc.org/sqlite"
 )
 
 type serviceFixture struct {
@@ -265,5 +267,36 @@ func TestQuickOnlyBaselineSchedulesExactOnStart(t *testing.T) {
 	}
 	if sc.quick.IsZero() {
 		t.Fatal("quick schedule missing")
+	}
+}
+
+func TestStatusRecoversAbandonedRun(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	run, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeFull, SizeBasis: model.BasisAllocated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-5 * time.Minute).UnixMilli()
+	raw, err := sql.Open("sqlite", f.cfg.Database.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.ExecContext(context.Background(),
+		`UPDATE scan_runs SET heartbeat_at=? WHERE id=?`, old, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	view, err := f.svc.Status(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Active != nil {
+		t.Fatalf("abandoned run still active: %+v", view.Active)
+	}
+	if view.Root.Status == model.DataScanning {
+		t.Fatalf("root still scanning after recovery")
 	}
 }

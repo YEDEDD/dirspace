@@ -500,9 +500,14 @@ func (s *Store) GetRun(ctx context.Context, id int64) (*model.Run, error) {
 
 // ActiveRun returns the current running/paused run for a root.
 func (s *Store) ActiveRun(ctx context.Context, rootID int64) (*model.Run, error) {
+	// A killed scanner cannot clear its own row. Do not present a heartbeat
+	// older than 90 seconds as a live task; the daemon/status recovery path
+	// will mark it interrupted.
+	cutoff := time.Now().UTC().Add(-90 * time.Second).UnixMilli()
 	run, err := scanRun(s.rdb.QueryRowContext(ctx, `SELECT `+runColumns+`
 		FROM scan_runs r JOIN roots ON roots.id=r.root_id
-		WHERE r.root_id=? AND r.status IN ('running','paused') ORDER BY r.id DESC LIMIT 1`, rootID))
+		WHERE r.root_id=? AND r.status IN ('running','paused') AND r.heartbeat_at >= ?
+		ORDER BY r.id DESC LIMIT 1`, rootID, cutoff))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

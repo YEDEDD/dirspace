@@ -99,7 +99,7 @@ func toRunJSON(run *model.Run) *runJSON {
 		return nil
 	}
 	duration := run.Duration
-	if duration == 0 && run.FinishedAt == nil {
+	if run.Status == model.RunRunning || run.Status == model.RunPaused || run.FinishedAt == nil {
 		duration = time.Since(run.StartedAt)
 	}
 	return &runJSON{
@@ -248,14 +248,15 @@ func printStatus(w io.Writer, view *service.StatusView) {
 	}
 	if view.Active != nil {
 		run := view.Active
-		fmt.Fprintf(w, "当前任务：#%d %s（%s） %d/%d 目录，%s 文件，%s\n",
+		elapsed := time.Since(run.StartedAt)
+		fmt.Fprintf(w, "当前任务：#%d %s（%s） %d/%d 目录，%s 文件，%s，已运行 %s\n",
 			run.ID, run.Mode.Label(), runStatusText(run.Status), run.ProcessedDirs,
-			run.TotalDirs, formatCount(run.TotalFiles), formatSize(run.TotalBytes))
+			run.TotalDirs, formatCount(run.TotalFiles), formatSize(run.TotalBytes),
+			formatDuration(elapsed))
 		if run.CurrentDir != "" {
 			fmt.Fprintf(w, "当前目录：%s\n", run.CurrentDir)
 		}
 		if run.ProcessedDirs > 0 && run.TotalDirs > run.ProcessedDirs {
-			elapsed := time.Since(run.StartedAt)
 			eta := time.Duration(float64(elapsed) / float64(run.ProcessedDirs) * float64(run.TotalDirs-run.ProcessedDirs))
 			fmt.Fprintf(w, "预计剩余：约 %s（按已完成目录平均）\n", formatDuration(eta))
 		}
