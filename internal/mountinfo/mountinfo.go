@@ -119,3 +119,25 @@ func IsMountPoint(path string) bool {
 	}
 	return filepath.Clean(m.Target) == filepath.Clean(path)
 }
+
+// IsWithinMount reports whether path is on a non-root mounted filesystem.
+// The root itself does not count: when a network mount is missing, its
+// subdirectories usually fall back to the root filesystem, and that must not
+// be accepted as a protected scan root. A path that is itself a mount target
+// or a subdirectory below one returns true.
+func IsWithinMount(path string) bool {
+	m, ok := InfoForPath(path)
+	if !ok {
+		return false
+	}
+	return mountCovers(m, path)
+}
+
+func mountCovers(m Mount, path string) bool {
+	target := filepath.Clean(m.Target)
+	cleanPath := filepath.Clean(path)
+	if target == string(filepath.Separator) {
+		return false
+	}
+	return cleanPath == target || strings.HasPrefix(cleanPath, target+string(filepath.Separator))
+}

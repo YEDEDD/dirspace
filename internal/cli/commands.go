@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.3.6"
+var Version = "1.3.7"
 
 const (
 	exitOK      = 0
@@ -562,6 +562,7 @@ func buildConfigJSON(cfg *config.Config) map[string]any {
 		"nfs_pause_latency":    cfg.Performance.NFSPauseLatency.Duration.String(),
 		"require_mount_point":  cfg.Scan.RequireMountPoint,
 		"is_mount_point":       mountinfo.IsMountPoint(cfg.Scan.RootPath),
+		"is_within_mount":      mountinfo.IsWithinMount(cfg.Scan.RootPath),
 		"mount_type":           mountinfo.FSType(cfg.Scan.RootPath),
 		"mount_server":         mountinfo.Server(cfg.Scan.RootPath),
 	}
@@ -597,7 +598,9 @@ func printConfig(w io.Writer, cfg *config.Config) {
 	if cfg.Scan.RequireMountPoint {
 		mountGuard = "开"
 	}
-	fmt.Fprintf(w, "挂载保护：%s（require_mount_point=%t）\n", mountGuard, cfg.Scan.RequireMountPoint)
+	mountOK := !cfg.Scan.RequireMountPoint || mountinfo.IsWithinMount(cfg.Scan.RootPath)
+	fmt.Fprintf(w, "挂载保护：%s（require_mount_point=%t，判定=%s）\n",
+		mountGuard, cfg.Scan.RequireMountPoint, map[bool]string{true: "通过", false: "失败"}[mountOK])
 	fmt.Fprintf(w, "挂载类型：%s", mountType)
 	if server := mountinfo.Server(cfg.Scan.RootPath); server != "" {
 		fmt.Fprintf(w, "，服务端：%s", server)

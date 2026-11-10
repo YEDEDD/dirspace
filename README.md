@@ -123,7 +123,7 @@ scan:
   require_mount_point: true
 ```
 
-生产环境建议加 `require_mount_point: true`，避免挂载没就绪时误扫本地盘。
+生产环境建议加 `require_mount_point: true`，避免挂载没就绪时误扫本地盘。`root_path` 可以是挂载点本身，也可以是挂载点下的子目录；判定要求路径位于一个**非根文件系统**的挂载点下，挂载失败回落到 `/` 时会被拒绝。
 
 ### profile
 

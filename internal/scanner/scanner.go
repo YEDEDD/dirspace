@@ -191,8 +191,8 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	if !info.IsDir() {
 		return nil, fmt.Errorf("扫描根目录不是目录: %s", rootPath)
 	}
-	if s.cfg.Scan.RequireMountPoint && !mountinfo.IsMountPoint(rootPath) {
-		return nil, fmt.Errorf("扫描根不是挂载点: %s（挂载未就绪，或请关闭 scan.require_mount_point）", rootPath)
+	if s.cfg.Scan.RequireMountPoint && !mountinfo.IsWithinMount(rootPath) {
+		return nil, fmt.Errorf("扫描根不在独立挂载点上: %s（挂载未就绪，或请关闭 scan.require_mount_point）", rootPath)
 	}
 	if req.TargetDir != "" {
 		if err := validateDirName(req.TargetDir); err != nil {
