@@ -98,10 +98,9 @@ func (s *Scanner) walkDir(ctx context.Context, sess *scanSession, topName, dir s
 			}
 			return fmt.Errorf("读取目录失败 %s: %w", dir, readErr)
 		}
+		var files []string
+		var dirs []string
 		for _, entry := range entries {
-			if err := sess.wait(ctx); err != nil {
-				return err
-			}
 			name := entry.Name()
 			path := filepath.Join(dir, name)
 			typ := entry.Type()
@@ -111,83 +110,49 @@ func (s *Scanner) walkDir(ctx context.Context, sess *scanSession, topName, dir s
 			}
 			if typ.IsDir() {
 				out.DirCount++
-				if err := s.walkDir(ctx, sess, topName, path, depth+1, out); err != nil {
-					return err
-				}
+				dirs = append(dirs, path)
 				continue
 			}
-			if err := sess.wait(ctx); err != nil {
-				return err
+			// DT_UNKNOWN is common on NFS; let the worker Lstat and report
+			// whether this is actually a directory.
+			files = append(files, path)
+		}
+		results, fileErr := s.scanFiles(ctx, sess, topName, files)
+		if fileErr != nil {
+			return fileErr
+		}
+		for _, res := range results {
+			if res.err != nil {
+				return res.err
 			}
-			statStart := time.Now()
-			info, statErr := os.Lstat(path)
-			sess.controller.ObserveMetadata(time.Since(statStart), statErr)
-			if statErr != nil {
-				if errors.Is(statErr, os.ErrNotExist) {
-					out.TransientErrs++
-					continue
-				}
-				return fmt.Errorf("读取文件元数据失败 %s: %w", path, statErr)
-			}
-			if info.IsDir() {
+			if res.isDir {
 				out.DirCount++
-				if err := s.walkDir(ctx, sess, topName, path, depth+1, out); err != nil {
+				if err := s.walkDir(ctx, sess, topName, res.path, depth+1, out); err != nil {
 					return err
 				}
 				continue
 			}
-			if info.Mode()&os.ModeSymlink != 0 {
+			if res.symlink {
 				out.SymlinkCount++
 				continue
 			}
-			if !info.Mode().IsRegular() {
-				continue
+			out.FileCount += res.fileCount
+			out.AllocBytes += res.allocBytes
+			out.LogicalBytes += res.logicalBytes
+			out.TransientErrs += res.transientErrs
+			if res.fileCount > 0 {
+				sess.counters.files.Add(res.fileCount)
 			}
-			meta, exact := platform.Stat(info)
-			if !exact {
-				meta.Nlink = 1
-				out.TransientErrs++
+			if res.allocBytes != 0 {
+				sess.counters.alloc.Add(res.allocBytes)
 			}
-			if meta.Nlink == 0 {
-				out.TransientErrs++
-				continue
+			if res.logicalBytes != 0 {
+				sess.counters.logical.Add(res.logicalBytes)
 			}
-			counted := true
-			if meta.Nlink > 1 {
-				first, claimErr := sess.hardlinks.Claim(ctx, meta.Dev, meta.Inode, topName)
-				if claimErr != nil {
-					return fatal(fmt.Errorf("记录硬链接失败 %s: %w", path, claimErr))
-				}
-				counted = first
-			}
-			// File count is the number of paths (matching find); hard links are
-			// deduplicated only for bytes so one inode is not counted repeatedly.
-			out.FileCount++
-			sess.counters.files.Add(1)
-			if counted {
-				out.AllocBytes += meta.Allocated
-				out.LogicalBytes += meta.Logical
-				sess.counters.alloc.Add(meta.Allocated)
-				sess.counters.logical.Add(meta.Logical)
-			}
-			if sess.inventory != nil {
-				rel, relErr := filepath.Rel(sess.rootPath, path)
-				if relErr != nil {
-					return fatal(fmt.Errorf("计算相对路径失败 %s: %w", path, relErr))
-				}
-				if err := sess.inventory.Add(ctx, storage.InventoryRecord{
-					TopDir:     topName,
-					RelPath:    rel,
-					SizeBytes:  meta.Logical,
-					AllocBytes: meta.Allocated,
-					Inode:      meta.Inode,
-					Dev:        meta.Dev,
-					Nlink:      meta.Nlink,
-					MtimeNS:    meta.MtimeNS,
-					Mode:       meta.Mode,
-				}); err != nil {
-					return err
-				}
+		}
+		for _, path := range dirs {
+			if err := s.walkDir(ctx, sess, topName, path, depth+1, out); err != nil {
+				return err
 			}
 		}
 		if errors.Is(readErr, io.EOF) {

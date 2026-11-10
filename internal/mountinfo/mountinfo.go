@@ -109,3 +109,13 @@ func unescape(s string) string {
 	}
 	return b.String()
 }
+
+// IsMountPoint reports whether path is itself a mount target. It never
+// contacts the filesystem; on systems without /proc it returns false.
+func IsMountPoint(path string) bool {
+	m, ok := InfoForPath(path)
+	if !ok {
+		return false
+	}
+	return filepath.Clean(m.Target) == filepath.Clean(path)
+}

@@ -10,6 +10,8 @@ GitHub: <https://github.com/YEDEDD/dirspace>
 - 一级目录聚合，适合“哪个目录占了多少空间”的日常查询
 - 本地 SQLite WAL 缓存，查询不访问 NFS
 - 全局 QPS 限速、CPU/内存保护、NFS 延迟自适应暂停
+- 一级目录之间、单个目录内的文件元数据并行，总量受 profile 和 QPS 限制
+- 可选挂载点保护，避免 NFS/CFS 未挂载时误扫本地盘
 - 支持暂停、恢复、取消、断点续扫和单目录重算
 - 失败目录保留上次有效数据；不完整扫描不会覆盖正式缓存
 - 单个静态二进制，支持 systemd 和 JSON 输出
@@ -95,7 +97,7 @@ sudo systemctl enable --now dirspace-scan.timer
 
 ## 配置
 
-默认只需要三行：
+最少只需要三行：
 
 ```yaml
 profile: normal
@@ -103,6 +105,15 @@ scan:
   root_path: /mnt
   interval: 24h
 ```
+
+生产环境建议再加一行挂载保护：
+
+```yaml
+scan:
+  require_mount_point: true
+```
+
+开启后，`root_path` 不是挂载点就拒绝扫描，避免 CFS/NFS 没挂上时把本地盘当成业务盘扫。它只检查本机挂载表，不检查 NFS 服务端是否健康。
 
 ### profile
 
@@ -116,7 +127,8 @@ profile 只是基线。`performance` 下填写的字段会覆盖 profile 中的�
 
 ### 自动推导
 
-- `concurrency: auto` 表示“最多使用 profile 的 worker 上限”；实际 worker 数取一级目录数与上限的较小值。
+- `concurrency: auto` 表示“最多使用 profile 的 worker 上限”；一级目录之间并行，单个目录内的文件 `lstat` 也并行。
+- 单个一级目录很大时，会从总并发里分到更多内部 worker；一级目录很多时，worker 主要分给目录之间。
 - QPS 从上限的约 1/3 起步，延迟和错误正常时逐步上升，有压力时自动下降。
 - `max_load1` 默认 0，即不按本机 load 判断共享存储压力；需要时再打开。
 - `database.path` 默认 `/var/lib/dirspace/usage.db`，不在配置中填写也可以。
@@ -139,6 +151,25 @@ performance:
 `configs/config.yaml` 里有完整注释和可选字段。不要把数据库放在 NFS 上，也不要放在扫描根目录内。
 
 从 1.0 升级：`scan.full_scan_interval` 已删除，旧配置里删掉这一行即可；默认 profile 变为 `normal`，生产环境可先改成 `low` 试跑。
+
+## 扫描耗时
+
+扫描是**全量元数据遍历**，没有一个固定的“几分钟”。先看公式：
+
+```text
+耗时 ≈ (文件数 + 目录数 × 2) / 有效元数据 QPS
+有效 QPS ≈ min(配置 QPS, 并发数 / 平均元数据延迟)
+```
+
+按 1 个文件 1 次 `lstat`、每个目录约 2 次目录操作估算，不含网络抖动和 NFS 客户端缓存。目录越多、层级越深，实际越慢。
+
+| 文件数 | 100 QPS | 300 QPS | 1000 QPS |
+|---:|---:|---:|---:|
+| 100 万 | 约 2.8 小时 | 约 56 分钟 | 约 17 分钟 |
+| 1700 万 | 约 47 小时 | 约 15.7 小时 | 约 4.7 小时 |
+| 2000 万 | 约 55.6 小时 | 约 18.5 小时 | 约 5.6 小时 |
+
+上表只按文件数粗算，目录另加约 10%–20%。这是 QPS 打满时的下限；自适应限速会从约 1/3 QPS 起步，所以前几分钟更慢。若 NFS 元数据延迟是 20ms、并发 8，实际上限约 `8 / 0.02 = 400 ops/s`，即使配置 1000 QPS，2000 万文件也要约 14 小时。首次扫描和后续刷新都一样是元数据全量遍历；查询 `top` / `list` 只读本地 SQLite，不访问 NFS。
 
 ## 命令
 

@@ -152,6 +152,42 @@ func TestScanAggregatesAndHardlinks(t *testing.T) {
 	}
 }
 
+func TestScanRequiresMountPoint(t *testing.T) {
+	f := newScannerFixture(t)
+	f.cfg.Scan.RequireMountPoint = true
+	ctx := context.Background()
+	if _, err := f.scanner.Scan(ctx, Request{RootPath: f.root, Mode: model.ModeFull}); err == nil {
+		t.Fatal("expected non-mount root to be rejected")
+	}
+}
+
+func TestScanSingleTopDirUsesIntraWorkers(t *testing.T) {
+	f := newScannerFixture(t)
+	f.cfg.Performance.Concurrency = config.Concurrency{Max: 4}
+	for i := 0; i < 200; i++ {
+		writeFile(t, filepath.Join(f.root, "alpha", fmt.Sprintf("file-%03d", i)), 16)
+	}
+	ctx := context.Background()
+	summary, err := f.scanner.Scan(ctx, Request{RootPath: f.root, Mode: model.ModeFull})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalDirs != 1 || summary.FileCount != 200 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+	root, err := f.store.GetRoot(ctx, f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := f.store.GetDir(ctx, root.ID, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.FileCount != 200 {
+		t.Fatalf("file count=%d, want 200", row.FileCount)
+	}
+}
+
 func TestScanEmptyRoot(t *testing.T) {
 	f := newScannerFixture(t)
 	ctx := context.Background()

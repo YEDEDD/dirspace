@@ -18,6 +18,7 @@ import (
 
 	"github.com/YEDEDD/dirspace/internal/config"
 	"github.com/YEDEDD/dirspace/internal/model"
+	"github.com/YEDEDD/dirspace/internal/mountinfo"
 	"github.com/YEDEDD/dirspace/internal/performance"
 	"github.com/YEDEDD/dirspace/internal/platform"
 	"github.com/YEDEDD/dirspace/internal/storage"
@@ -74,15 +75,16 @@ func (c *progressCounters) getCurrent() string {
 }
 
 type scanSession struct {
-	rootPath   string
-	runID      int64
-	rootID     int64
-	single     bool
-	controller *performance.Controller
-	hardlinks  *hardlinkRegistry
-	inventory  *inventoryWriter
-	counters   *progressCounters
-	control    *scanControl
+	rootPath     string
+	runID        int64
+	rootID       int64
+	single       bool
+	controller   *performance.Controller
+	hardlinks    *hardlinkRegistry
+	inventory    *inventoryWriter
+	counters     *progressCounters
+	control      *scanControl
+	intraWorkers int
 }
 
 type fatalError struct{ err error }
@@ -139,6 +141,9 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("扫描根目录不是目录: %s", rootPath)
+	}
+	if s.cfg.Scan.RequireMountPoint && !mountinfo.IsMountPoint(rootPath) {
+		return nil, fmt.Errorf("扫描根不是挂载点: %s（挂载未就绪，或请关闭 scan.require_mount_point）", rootPath)
 	}
 	if req.TargetDir != "" {
 		if err := validateDirName(req.TargetDir); err != nil {
@@ -331,6 +336,12 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	if workerCount < 1 {
 		workerCount = 1
 	}
+	intraLimit := s.cfg.Performance.Concurrency.Limit()
+	intraWorkers := intraLimit / workerCount
+	if intraWorkers < 1 {
+		intraWorkers = 1
+	}
+	sess.intraWorkers = intraWorkers
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {

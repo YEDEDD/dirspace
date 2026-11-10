@@ -222,6 +222,10 @@ type ScanConfig struct {
 	SizeBasis  string   `yaml:"size_basis"`
 	ExtraRoots []string `yaml:"extra_roots"`
 	Interval   Duration `yaml:"interval"`
+	// RequireMountPoint makes a scan fail if RootPath is not a mount target.
+	// It protects against scanning the local root filesystem when an NFS/CFS
+	// mount is missing. Off by default so ordinary local directories still work.
+	RequireMountPoint bool `yaml:"require_mount_point"`
 	// ScanOnStart makes the daemon establish a baseline immediately when a root
 	// has never been scanned. Existing roots still wait for their interval.
 	ScanOnStart bool `yaml:"scan_on_start"`

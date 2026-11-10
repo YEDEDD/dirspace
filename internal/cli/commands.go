@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.1.0"
+var Version = "1.2.0"
 
 const (
 	exitOK      = 0
@@ -491,7 +491,7 @@ func buildConfigJSON(cfg *config.Config) map[string]any {
 		"profile":              cfg.Profile,
 		"root_path":            cfg.Scan.RootPath,
 		"database_path":        cfg.Database.Path,
-		"interval":             cfg.Scan.Interval.Duration.String(),
+		"interval":             formatInterval(cfg.Scan.Interval.Duration),
 		"retention_days":       cfg.Database.RetentionDays,
 		"concurrency":          cfg.Performance.Concurrency.String(),
 		"concurrency_auto":     cfg.Performance.Concurrency.Auto,
@@ -505,6 +505,8 @@ func buildConfigJSON(cfg *config.Config) map[string]any {
 		"max_load1":            cfg.Performance.MaxLoad1,
 		"nfs_slow_latency":     cfg.Performance.NFSSlowLatency.Duration.String(),
 		"nfs_pause_latency":    cfg.Performance.NFSPauseLatency.Duration.String(),
+		"require_mount_point":  cfg.Scan.RequireMountPoint,
+		"is_mount_point":       mountinfo.IsMountPoint(cfg.Scan.RootPath),
 		"mount_type":           mountinfo.FSType(cfg.Scan.RootPath),
 		"mount_server":         mountinfo.Server(cfg.Scan.RootPath),
 	}
@@ -520,7 +522,7 @@ func printConfig(w io.Writer, cfg *config.Config) {
 	fmt.Fprintf(w, "扫描根：%s\n", cfg.Scan.RootPath)
 	fmt.Fprintf(w, "数据库：%s\n", cfg.Database.Path)
 	fmt.Fprintf(w, "刷新间隔：%s（保留 %d 天历史）\n", formatInterval(cfg.Scan.Interval.Duration), cfg.Database.RetentionDays)
-	fmt.Fprintf(w, "并发：%s（实际 worker 取一级目录数与上限的较小值）\n", cfg.Performance.Concurrency)
+	fmt.Fprintf(w, "并发：%s（一级目录间并行；大目录内部使用剩余并发）\n", cfg.Performance.Concurrency)
 	fmt.Fprintf(w, "QPS：%d（自适应，起步约 %d）\n", cfg.Performance.MaxMetadataQPS, startQPS(cfg))
 	fmt.Fprintf(w, "CPU：%d%%；内存：%s\n", cfg.Performance.MaxCPUPercent, config.FormatBytes(cfg.Performance.MemoryLimit.Bytes))
 	fmt.Fprintf(w, "主机保护：CPU %g%%，Load1 %g（0 表示关闭）\n",
@@ -531,6 +533,11 @@ func printConfig(w io.Writer, cfg *config.Config) {
 	if mountType == "" {
 		mountType = "未知（根路径未挂载或无 mountinfo）"
 	}
+	mountGuard := "关"
+	if cfg.Scan.RequireMountPoint {
+		mountGuard = "开"
+	}
+	fmt.Fprintf(w, "挂载保护：%s（require_mount_point=%t）\n", mountGuard, cfg.Scan.RequireMountPoint)
 	fmt.Fprintf(w, "挂载类型：%s", mountType)
 	if server := mountinfo.Server(cfg.Scan.RootPath); server != "" {
 		fmt.Fprintf(w, "，服务端：%s", server)
