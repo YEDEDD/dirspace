@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -525,5 +526,22 @@ func TestQuickScanMarksSampledAndCountsFiles(t *testing.T) {
 	}
 	if lastProgress.Bytes != summary.TotalAlloc {
 		t.Fatalf("progress bytes=%d, summary total=%d", lastProgress.Bytes, summary.TotalAlloc)
+	}
+}
+
+func TestProgressActiveKeepsSlowWorkerVisible(t *testing.T) {
+	var counters progressCounters
+	counters.startCurrent("cae365-cae365-pvc")
+	counters.startCurrent("turing-data-etcd-2")
+	if got := counters.getCurrent(); !strings.Contains(got, "cae365") || !strings.Contains(got, "turing") {
+		t.Fatalf("both active dirs should be visible: %q", got)
+	}
+	counters.finishCurrent("turing-data-etcd-2")
+	if got := counters.getCurrent(); got != "cae365-cae365-pvc" {
+		t.Fatalf("finished worker still visible: %q", got)
+	}
+	counters.finishCurrent("cae365-cae365-pvc")
+	if got := counters.getCurrent(); got != "" {
+		t.Fatalf("active set should be empty: %q", got)
 	}
 }

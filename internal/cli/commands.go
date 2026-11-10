@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.3.4"
+var Version = "1.3.5"
 
 const (
 	exitOK      = 0

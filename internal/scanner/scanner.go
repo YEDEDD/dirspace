@@ -65,10 +65,57 @@ type progressCounters struct {
 	alloc   atomic.Int64
 	logical atomic.Int64
 	done    atomic.Int64
-	current atomic.Value // string
+
+	// current is the last name set, kept for backward compatibility with
+	// callers that only need a single value. active is the authoritative set
+	// of top-level directories that workers are actually scanning; a slow
+	// directory must not disappear from status just because a faster worker
+	// started (and finished) later.
+	current  atomic.Value // string
+	active   map[string]int
+	activeMu sync.Mutex
 }
 
-func (c *progressCounters) setCurrent(name string) { c.current.Store(name) }
+func (c *progressCounters) startCurrent(name string) {
+	c.activeMu.Lock()
+	if c.active == nil {
+		c.active = make(map[string]int)
+	}
+	c.active[name]++
+	text := c.activeTextLocked()
+	c.activeMu.Unlock()
+	c.current.Store(text)
+}
+
+func (c *progressCounters) finishCurrent(name string) {
+	c.activeMu.Lock()
+	if c.active != nil {
+		if n := c.active[name]; n <= 1 {
+			delete(c.active, name)
+		} else {
+			c.active[name] = n - 1
+		}
+	}
+	text := c.activeTextLocked()
+	c.activeMu.Unlock()
+	c.current.Store(text)
+}
+
+func (c *progressCounters) activeTextLocked() string {
+	if len(c.active) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(c.active))
+	for name := range c.active {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) <= 3 {
+		return strings.Join(names, ", ")
+	}
+	return strings.Join(names[:3], ", ") + fmt.Sprintf(" 等 %d 个目录", len(names))
+}
+
 func (c *progressCounters) getCurrent() string {
 	value, _ := c.current.Load().(string)
 	return value
@@ -373,8 +420,9 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 				if scanCtx.Err() != nil {
 					return
 				}
-				counters.setCurrent(entry.name)
+				counters.startCurrent(entry.name)
 				out, scanErr := s.scanTop(scanCtx, sess, entry.name)
+				counters.finishCurrent(entry.name)
 				out.Name = entry.name
 				if scanErr != nil {
 					var fe *fatalError
