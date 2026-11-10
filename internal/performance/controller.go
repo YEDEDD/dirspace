@@ -43,6 +43,7 @@ type Controller struct {
 
 	pauseUntil     atomic.Int64
 	memoryPressure atomic.Bool
+	metadataOps    atomic.Int64
 	paused         atomic.Bool
 	reason         atomic.Value // string
 	lastPauseLog   int64
@@ -222,6 +223,7 @@ func (c *Controller) Wait(ctx context.Context) error {
 
 // ObserveMetadata records the latency and network errors of one metadata call.
 func (c *Controller) ObserveMetadata(d time.Duration, err error) {
+	c.metadataOps.Add(1)
 	if d > 0 {
 		seconds := d.Seconds()
 		c.mu.Lock()
@@ -286,6 +288,10 @@ func (c *Controller) Paused() (bool, string) {
 
 // Rate is the current metadata QPS.
 func (c *Controller) Rate() float64 { return c.throttle.Rate() }
+
+// MetadataOps returns the number of metadata operations observed by this
+// process. It is used by status to report the actual scan rate.
+func (c *Controller) MetadataOps() int64 { return c.metadataOps.Load() }
 
 // Latency returns the current NFS metadata EWMA in milliseconds.
 func (c *Controller) Latency() float64 {

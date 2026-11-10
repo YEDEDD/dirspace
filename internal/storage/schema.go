@@ -2,7 +2,7 @@ package storage
 
 // schemaVersion is bumped whenever an incompatible or additive migration is
 // required. The program refuses to open a database created by a newer version.
-const schemaVersion = 3
+const schemaVersion = 6
 
 var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS roots (
@@ -48,7 +48,10 @@ var schemaStatements = []string{
 		self_completed INTEGER NOT NULL DEFAULT 0,
 		current_dir TEXT NOT NULL DEFAULT '',
 		error TEXT NOT NULL DEFAULT '',
-		duration_ms INTEGER NOT NULL DEFAULT 0
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		metadata_ops INTEGER NOT NULL DEFAULT 0,
+		metadata_qps REAL NOT NULL DEFAULT 0,
+		metadata_limit REAL NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_scan_runs_root_status ON scan_runs(root_id, status, id DESC)`,
 
@@ -62,6 +65,7 @@ var schemaStatements = []string{
 		symlink_count INTEGER NOT NULL DEFAULT 0,
 		duration_ms INTEGER NOT NULL DEFAULT 0,
 		transient_errors INTEGER NOT NULL DEFAULT 0,
+		truncated INTEGER NOT NULL DEFAULT 0,
 		error TEXT NOT NULL DEFAULT '',
 		completed_at INTEGER NOT NULL,
 		PRIMARY KEY(run_id, name)
@@ -77,6 +81,7 @@ var schemaStatements = []string{
 		dir_count INTEGER NOT NULL DEFAULT 0,
 		symlink_count INTEGER NOT NULL DEFAULT 0,
 		duration_ms INTEGER NOT NULL DEFAULT 0,
+		truncated INTEGER NOT NULL DEFAULT 0,
 		data_status TEXT NOT NULL DEFAULT 'never',
 		accuracy TEXT NOT NULL DEFAULT 'unknown',
 		last_success_at INTEGER,
@@ -86,6 +91,26 @@ var schemaStatements = []string{
 		UNIQUE(root_id, name)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_top_dirs_rank ON top_dirs(root_id, alloc_bytes DESC, name ASC)`,
+
+	`CREATE TABLE IF NOT EXISTS dir_index (
+		root_id INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+		path TEXT NOT NULL,
+		parent_path TEXT NOT NULL DEFAULT '',
+		name TEXT NOT NULL,
+		depth INTEGER NOT NULL,
+		alloc_bytes INTEGER NOT NULL DEFAULT 0,
+		logical_bytes INTEGER NOT NULL DEFAULT 0,
+		file_count INTEGER NOT NULL DEFAULT 0,
+		dir_count INTEGER NOT NULL DEFAULT 0,
+		symlink_count INTEGER NOT NULL DEFAULT 0,
+		data_status TEXT NOT NULL DEFAULT 'never',
+		accuracy TEXT NOT NULL DEFAULT 'unknown',
+		truncated INTEGER NOT NULL DEFAULT 0,
+		run_id INTEGER NOT NULL DEFAULT 0,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY(root_id, path)
+	) WITHOUT ROWID`,
+	`CREATE INDEX IF NOT EXISTS idx_dir_index_children ON dir_index(root_id, parent_path, alloc_bytes DESC, name ASC)`,
 
 	`CREATE TABLE IF NOT EXISTS dir_history (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,4 +176,9 @@ var schemaColumns = []struct {
 	{"scan_runs", "self_symlink_count", "INTEGER NOT NULL DEFAULT 0"},
 	{"scan_runs", "self_transient_errors", "INTEGER NOT NULL DEFAULT 0"},
 	{"scan_runs", "self_completed", "INTEGER NOT NULL DEFAULT 0"},
+	{"scan_runs", "metadata_ops", "INTEGER NOT NULL DEFAULT 0"},
+	{"scan_runs", "metadata_qps", "REAL NOT NULL DEFAULT 0"},
+	{"scan_runs", "metadata_limit", "REAL NOT NULL DEFAULT 0"},
+	{"run_dirs", "truncated", "INTEGER NOT NULL DEFAULT 0"},
+	{"top_dirs", "truncated", "INTEGER NOT NULL DEFAULT 0"},
 }

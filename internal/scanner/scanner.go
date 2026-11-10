@@ -134,6 +134,10 @@ type scanSession struct {
 	intraWorkers       int
 	quick              bool
 	quickSamplePercent int
+	quickSalt          uint64
+	rollups            *rollupCollector
+	quickSlots         chan struct{}
+	quickMaxFiles      int64
 }
 
 type fatalError struct{ err error }
@@ -212,6 +216,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 
 	run, err := s.store.StartRun(ctx, rootPath, storage.StartOptions{
 		Mode:           req.Mode,
+		MetadataLimit:  float64(s.cfg.Performance.MaxMetadataQPS),
 		SizeBasis:      basis,
 		Resume:         req.Resume,
 		ResumeCanceled: req.ResumeCanceled,
@@ -363,11 +368,21 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		control:            control,
 		quick:              req.Mode == model.ModeQuick,
 		quickSamplePercent: s.cfg.Scan.QuickSamplePercent,
+		quickSalt:          uint64(run.ID),
+		quickMaxFiles:      s.cfg.Scan.QuickMaxFilesPerTop,
+	}
+	if req.TargetDir == "" && req.Mode != model.ModeIncremental && s.cfg.Scan.IndexDepth > 0 {
+		accuracy := model.AccuracyExact
+		if req.Mode == model.ModeQuick {
+			accuracy = model.AccuracySampled
+		}
+		sess.rollups = newRollupCollector(rootPath, s.cfg.Scan.IndexDepth,
+			s.cfg.Scan.IndexTopK, accuracy)
 	}
 
 	heartbeatCtx, stopHeartbeat := context.WithCancel(scanCtx)
 	defer stopHeartbeat()
-	go s.heartbeatLoop(heartbeatCtx, run, req, counters, control, started, cancelScan)
+	go s.heartbeatLoop(heartbeatCtx, run, req, counters, control, controller, started, cancelScan)
 
 	// Files and the directory block directly under the scan root belong to the
 	// root aggregate, not to any first-level child. They are captured before
@@ -411,7 +426,16 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	if intraWorkers < 1 {
 		intraWorkers = 1
 	}
-	sess.intraWorkers = intraWorkers
+	if req.Mode == model.ModeQuick {
+		// Quick-mode top-level workers each get a full internal pool, but a
+		// shared semaphore caps total metadata concurrency. When only one big
+		// top-level directory remains, its pool can use all slots instead of
+		// being stuck at limit/topCount workers.
+		sess.intraWorkers = intraLimit
+		sess.quickSlots = make(chan struct{}, intraLimit)
+	} else {
+		sess.intraWorkers = intraWorkers
+	}
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
@@ -496,6 +520,29 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		return summary, canceled(control, ctx.Err())
 	}
 
+	if sess.rollups != nil {
+		if run.Resumed {
+			// A resumed run only contains the unfinished part of the tree.
+			// Keeping the previous index is safer than replacing it with a
+			// partial snapshot; the next full run refreshes it.
+			s.log.Info("续扫不重建目录索引", "run_id", run.ID)
+		} else {
+			rows := sess.rollups.rows(time.Now())
+			if err := s.store.ReplaceDirIndex(scanCtx, run.RootID, run.ID, rows); err != nil {
+				summary := s.finishAbort(run, req, control, fmt.Errorf("保存目录索引失败: %w", err))
+				return summary, canceled(control, err)
+			}
+		}
+	}
+
+	elapsed := time.Since(started).Seconds()
+	finalQPS := 0.0
+	if elapsed > 0 {
+		finalQPS = float64(controller.MetadataOps()) / elapsed
+	}
+	if err := s.store.SetRunMetadata(scanCtx, run.ID, controller.MetadataOps(), finalQPS, controller.Rate()); err != nil {
+		s.log.Warn("保存元数据 QPS 失败", "error", err.Error())
+	}
 	summary, err := s.store.CompleteRun(ctx, run.ID, req.TargetDir != "",
 		req.TargetDir != "" || req.Mode == model.ModeIncremental, func() bool {
 			return control.canceled.Load()
@@ -671,7 +718,7 @@ func (s *Scanner) monitorControl(ctx context.Context, run *model.Run, control *s
 	}
 }
 
-func (s *Scanner) heartbeatLoop(ctx context.Context, run *model.Run, req Request, counters *progressCounters, control *scanControl, started time.Time, cancel context.CancelFunc) {
+func (s *Scanner) heartbeatLoop(ctx context.Context, run *model.Run, req Request, counters *progressCounters, control *scanControl, controller *performance.Controller, started time.Time, cancel context.CancelFunc) {
 	heartbeat := s.cfg.Performance.HeartbeatInterval.Duration
 	progressEvery := s.cfg.Performance.ProgressInterval.Duration
 	if heartbeat < time.Second {
@@ -684,13 +731,24 @@ func (s *Scanner) heartbeatLoop(ctx context.Context, run *model.Run, req Request
 	defer hbTicker.Stop()
 	progressTicker := time.NewTicker(progressEvery)
 	defer progressTicker.Stop()
+	lastOps := int64(0)
+	lastAt := time.Now()
+	qps := 0.0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-hbTicker.C:
+			ops := controller.MetadataOps()
+			now := time.Now()
+			if elapsed := now.Sub(lastAt); elapsed > 0 {
+				qps = float64(ops-lastOps) / elapsed.Seconds()
+			}
+			lastOps = ops
+			lastAt = now
 			ok, err := s.store.Heartbeat(context.WithoutCancel(ctx), run.ID, counters.getCurrent(),
-				counters.done.Load(), counters.files.Load(), counters.alloc.Load())
+				counters.done.Load(), counters.files.Load(), counters.alloc.Load(),
+				ops, qps, controller.Rate())
 			if err != nil {
 				s.log.Warn("更新扫描心跳失败", "error", err.Error())
 			} else if !ok {
@@ -712,6 +770,7 @@ func (s *Scanner) heartbeatLoop(ctx context.Context, run *model.Run, req Request
 				Bytes:      counters.alloc.Load(),
 				Paused:     control.paused.Load(),
 				Elapsed:    time.Since(started),
+				QPS:        qps,
 			})
 		}
 	}

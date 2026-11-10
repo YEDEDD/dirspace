@@ -275,6 +275,7 @@ func (s *Scanner) processDirTask(ctx context.Context, sess *scanSession, q *tree
 		}
 	}
 	flushFiles()
+	sess.rollups.addDirect(task.path, agg, false)
 	return agg, nil
 }
 
@@ -311,5 +312,6 @@ func (s *Scanner) processFileTask(ctx context.Context, sess *scanSession, topNam
 			sess.counters.logical.Add(res.logicalBytes)
 		}
 	}
+	sess.rollups.addDirect(task.path, agg, false)
 	return agg, nil
 }

@@ -1,6 +1,6 @@
 # dirspace
 
-`dirspace` 是一个面向 Linux 的目录空间扫描与缓存服务，适合 NFS、CFS、Lustre 等共享文件系统。它只读文件元数据，统计扫描根目录下**一级子目录**的空间、文件数、子目录数、耗时、状态和准确性，结果写入本地 SQLite。日常查询只读本地缓存，不访问共享存储。
+`dirspace` 是一个面向 Linux 的目录空间扫描与缓存服务，适合 NFS、CFS、Lustre 等共享文件系统。它只读文件元数据，统计扫描根目录下**一级子目录**的空间、文件数、子目录数、耗时、状态和准确性，并把受限深度的目录索引写入本地 SQLite。日常查询只读本地缓存，不访问共享存储。
 
 GitHub: <https://github.com/YEDEDD/dirspace>
 
@@ -8,9 +8,10 @@ GitHub: <https://github.com/YEDEDD/dirspace>
 
 - 只读元数据，不读文件内容，不写扫描根目录
 - 一级目录聚合，直接回答“哪个目录占了多少空间”
+- 可配置深度的目录索引，支持 `children` 查询多级明细；只保留每层 top K，避免数据库膨胀
 - 本地 SQLite WAL 缓存，查询不访问共享存储
 - **精确全量**与**快速抽样估算**双模式：精确每周一次，快速默认每 6 小时一次
-- 递归目录树并行：一级目录、子目录、文件 `lstat` 共用工作队列
+- 递归目录树并行：一级目录、子目录、文件 `lstat` 共用工作队列；quick 也使用共享 worker 池，单个超大一级目录不再独占一个线程
 - `scan --new` 只扫新增或失效的一级目录，不重扫已有的
 - 已删除目录默认从排名中隐藏，并按 `stale_retention_days` 清理
 - 全局限速、CPU/内存保护、共享文件系统延迟自适应暂停
@@ -49,6 +50,7 @@ dirspace config explain       # 先看最终配置、挂载和自动推导值
 dirspace quick                # 先跑快速估算，几分钟到几小时出近似结果
 dirspace scan                 # 再跑精确全量，建立准确基线
 dirspace top 20               # 查询只读 SQLite
+dirspace children --path /mnt/cae365  # 查看一级目录下的多级明细
 dirspace partial              # 扫描中查看已完成目录（staging，完整名称）
 dirspace status               # 进度、ETA、已完成目录合计、数据库
 ```
@@ -120,10 +122,49 @@ scan:
   interval: 168h
   quick_interval: 6h
   quick_sample_percent: 2
+  index_depth: 3
+  index_top_k: 20
+  quick_max_files_per_top: 0  # 0 不限制；>0 时超大目录最多扫这么多文件
   require_mount_point: true
 ```
 
 生产环境建议加 `require_mount_point: true`，避免挂载没就绪时误扫本地盘。`root_path` 可以是挂载点本身，也可以是挂载点下的子目录；判定要求路径位于一个**非根文件系统**的挂载点下，挂载失败回落到 `/` 时会被拒绝。
+
+### 目录索引与下钻
+
+扫描时会顺便建立一层受限的目录索引，用于回答“这个目录下面的哪个子目录大”：
+
+```yaml
+scan:
+  index_depth: 3   # 缓存到几级；0 关闭；可设为 4、5
+  index_top_k: 20  # 每个目录只保留最大的 20 个子目录
+```
+
+- 一级目录全部保留
+- 更深层只保留每个父目录的 top K，避免几十亿目录全部写进 SQLite
+- quick 和 exact 都会建立索引；quick 的结果标记为 `sampled`
+- 索引不会增加 NFS 读取次数；扫描本来就会遍历这些目录
+- `index_depth` 只影响内存、数据库大小和可查询深度，不改变扫描范围
+
+如果某个一级目录特别大，可以设置：
+
+```yaml
+scan:
+  quick_max_files_per_top: 5000000
+```
+
+达到上限后该目录停止继续枚举，结果标记为 `partial`，空间显示为 `≥`，文件数是已扫到的数量。它是下限，不是完整值；精确全量不受此限制。这样小目录可以先完成，不会被一个巨型目录拖住。
+
+查询某个目录的直接子目录：
+
+```bash
+dirspace children --path /mnt/cae365
+dirspace children --path /mnt/cae365/map --json
+```
+
+如果路径没有出现在索引里，说明它不在 top K 中，或者超过了 `index_depth`；可以提高 `index_depth` 后重新扫描。当前版本还没有对任意深层路径单独 drill 的命令，`rebuild` 仍然只支持一级目录。
+
+索引在完整扫描成功后原子替换；断点续扫不会用不完整的结果覆盖旧索引，下一次完整扫描会刷新。
 
 ### profile
 
@@ -247,6 +288,7 @@ sudo systemctl daemon-reload
 |---|---|
 | `dirspace` / `dirspace top 20` | 一级目录空间排名，显示数据时间、状态、耗时 |
 | `dirspace list` | 全部可见一级目录（完整名称） |
+| `dirspace children --path /mnt/a` | 查看目录索引中 a 的直接子目录（受 index_depth/top_k 限制） |
 | `dirspace partial` | 当前扫描已完成的 staging 目录、完整名称、合计空间 |
 | `dirspace status` | 缓存、当前任务、已完成目录合计、预计剩余、隐藏 stale 行、数据库 |
 | `dirspace config explain` | 最终生效配置和自动推导值 |
@@ -265,17 +307,30 @@ sudo systemctl daemon-reload
 
 ## 语义与限制
 
-- **只统计一级子目录**；更深层文件递归汇总到一级目录。
+- 排名和 `top` 仍以一级子目录为单位；目录索引额外保存到 `index_depth` 层的 top K 子目录，供 `children` 下钻。
 - 默认按 `allocated`（`st_blocks × 512`）统计，接近 `du`；`--logical` 使用 `st_size`。
 - **精确全量每轮都遍历全部元数据**。没有可靠的 NFS/Lustre 客户端增量，目录 mtime 和 inotify 都不可靠。
 - `scan --new` 只处理新增或非 fresh 的一级目录，不检查已有目录内部的变化；结果标记为近似。
 - 快速估算的字节数是抽样推算，目录块和文件数是精确的；硬链接不做去重，可能轻微高估。
+- 快速抽样按“路径哈希 + 每目录前 32 个文件 census”选择，并对剩余文件做权重还原；不是按目录顺序取每 N 个。小目录因此精确，大目录仍可能因为超大文件漏采而偏差。当前没有置信区间输出。
 - 共享文件系统客户端有属性缓存，结果不是实时值；删除的目录可能短暂显示为 stale，随后隐藏并清理。
 - 硬链接在精确模式下只计一次，归属目录在并发扫描下可能变化；总量准确，单目录可能有偏差。
 - 扫描失败或取消不发布半成品；失败目录保留上次有效数据。
 - 查询只读 SQLite，共享存储断开时历史结果仍可查看。
+- `status` 显示当前心跳窗口的**实际元数据 QPS**和当前限速；任务结束后显示本轮全程平均 QPS。
 - 这是容量审计/容量视图工具，不是实时监控，也不是文件内容扫描器。
 - 500T 级别且要求精确、低延迟时，单机全量不是正确架构；需要多客户端分片，当前版本没有实现。
+
+## 冷数据安全
+
+扫描只读取元数据，不读取文件内容，也不执行任何回热动作：
+
+- 只用 `Lstat`、`stat`、`readdir`、`fstat`，不 `open` 普通文件
+- 不执行 `lfs hsm_restore`，不调用 CFS 生命周期预热/拉取接口
+- 不写入扫描目录，不重命名、不改权限、不改属主
+- 元数据查询不更新文件 `atime`，因此不会触发 CFS 低频层/外置存储的数据加载
+
+需要放在本地盘的只有 SQLite、日志、配置和备份文件；数据库路径会拒绝扫描根目录内和 NFS 挂载点。不要把 `--config`、`--output` 指向需要保持冷的业务文件。
 
 ## 开发与许可
 

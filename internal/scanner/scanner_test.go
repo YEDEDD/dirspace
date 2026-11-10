@@ -545,3 +545,112 @@ func TestProgressActiveKeepsSlowWorkerVisible(t *testing.T) {
 		t.Fatalf("active set should be empty: %q", got)
 	}
 }
+
+func TestDirectoryIndexDepthAndTopK(t *testing.T) {
+	f := newScannerFixture(t)
+	f.cfg.Scan.IndexDepth = 2
+	f.cfg.Scan.IndexTopK = 2
+	writeFile(t, filepath.Join(f.root, "a", "b1", "big.bin"), 4<<20)
+	writeFile(t, filepath.Join(f.root, "a", "b2", "small.bin"), 1<<20)
+	writeFile(t, filepath.Join(f.root, "a", "b3", "bigger.bin"), 8<<20)
+	writeFile(t, filepath.Join(f.root, "a", "b1", "c", "deep.bin"), 2<<20)
+	writeFile(t, filepath.Join(f.root, "d", "one.bin"), 512<<10)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := f.scanner.Scan(ctx, Request{RootPath: f.root, Mode: model.ModeFull}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	root, err := f.store.GetRoot(ctx, f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	top, err := f.store.Children(ctx, root.ID, "", 0, model.BasisAllocated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(top) != 2 {
+		t.Fatalf("top entries=%d, want 2", len(top))
+	}
+	children, err := f.store.Children(ctx, root.ID, "a", 0, model.BasisAllocated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 2 {
+		t.Fatalf("a children=%d, want top-2", len(children))
+	}
+	if children[0].Path != "a/b3" || children[1].Path != "a/b1" {
+		t.Fatalf("top-k children=%v", []string{children[0].Path, children[1].Path})
+	}
+	if children[0].AllocBytes < 8<<20 {
+		t.Fatalf("a/b3 bytes=%d", children[0].AllocBytes)
+	}
+	// Depth 3 is deliberately outside index_depth=2.
+	if _, err := f.store.GetIndexEntry(ctx, root.ID, "a/b1/c"); err == nil {
+		t.Fatal("deep entry should not be indexed at depth 2")
+	}
+}
+
+func TestQuickDirectoryIndexUsesSampledAccuracy(t *testing.T) {
+	f := newScannerFixture(t)
+	f.cfg.Scan.IndexDepth = 3
+	f.cfg.Scan.IndexTopK = 5
+	writeFile(t, filepath.Join(f.root, "a", "b", "c", "file.bin"), 1<<20)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := f.scanner.Scan(ctx, Request{RootPath: f.root, Mode: model.ModeQuick}); err != nil {
+		t.Fatalf("quick: %v", err)
+	}
+	root, err := f.store.GetRoot(ctx, f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := f.store.GetIndexEntry(ctx, root.ID, "a/b/c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Accuracy != model.AccuracySampled {
+		t.Fatalf("accuracy=%s, want sampled", entry.Accuracy)
+	}
+}
+
+func TestQuickBudgetMarksPartialLowerBound(t *testing.T) {
+	f := newScannerFixture(t)
+	f.cfg.Scan.QuickMaxFilesPerTop = 1
+	for i := 0; i < 5; i++ {
+		writeFile(t, filepath.Join(f.root, "a", fmt.Sprintf("f%d", i)), 1<<20)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	summary, err := f.scanner.Scan(ctx, Request{RootPath: f.root, Mode: model.ModeQuick})
+	if err != nil {
+		t.Fatalf("quick: %v", err)
+	}
+	if summary.FileCount != 1 {
+		t.Fatalf("budget summary files=%d, want 1", summary.FileCount)
+	}
+	if summary.DataStatus != model.DataPartial || summary.Accuracy != model.AccuracyApproximate {
+		t.Fatalf("budget summary status=%s accuracy=%s", summary.DataStatus, summary.Accuracy)
+	}
+	root, err := f.store.GetRoot(ctx, f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := f.store.ListDirs(ctx, root.ID, 0, model.BasisAllocated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || !rows[0].Truncated || rows[0].DataStatus != model.DataPartial {
+		t.Fatalf("rows=%+v", rows)
+	}
+	if rows[0].Accuracy != model.AccuracyApproximate {
+		t.Fatalf("accuracy=%s", rows[0].Accuracy)
+	}
+	indexed, err := f.store.GetIndexEntry(ctx, root.ID, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !indexed.Truncated {
+		t.Fatal("index entry should be truncated")
+	}
+}

@@ -195,6 +195,26 @@ func TestHardlinkClaimOnlyOnce(t *testing.T) {
 	}
 }
 
+func TestHeartbeatPersistsMetadataQPS(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	run, err := store.StartRun(ctx, filepath.Join(t.TempDir(), "root"), StartOptions{Mode: model.ModeFull})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := store.Heartbeat(ctx, run.ID, "alpha", 2, 10, 4096, 123, 45.5, 100)
+	if err != nil || !ok {
+		t.Fatalf("heartbeat: ok=%v err=%v", ok, err)
+	}
+	active, err := store.ActiveRun(ctx, run.RootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.MetadataOps != 123 || active.MetadataQPS != 45.5 || active.MetadataLimit != 100 {
+		t.Fatalf("qps fields: %+v", active)
+	}
+}
+
 func TestBackupAndCleanup(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()

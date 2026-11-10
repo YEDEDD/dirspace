@@ -167,10 +167,32 @@ type DirStat struct {
 	LastSuccessAt *time.Time
 	LastAttemptAt *time.Time
 	LastError     string
+	Truncated     bool
 }
 
 // HasData reports whether a row has a successful baseline to display.
 func (d DirStat) HasData() bool { return d.LastSuccessAt != nil }
+
+// DirIndexEntry is one cached directory in the depth-limited directory index.
+// Path is relative to the scan root and uses forward slashes. Entries are
+// selected per parent by top-K allocated bytes, so an entry is guaranteed to
+// have a parent entry but not every child of a directory is present.
+type DirIndexEntry struct {
+	RootID       int64
+	Path         string
+	ParentPath   string
+	Name         string
+	Depth        int
+	AllocBytes   int64
+	LogicalBytes int64
+	FileCount    int64
+	DirCount     int64
+	SymlinkCount int64
+	DataStatus   DataStatus
+	Accuracy     Accuracy
+	Truncated    bool
+	UpdatedAt    time.Time
+}
 
 // Run describes a scan run and its progress.
 type Run struct {
@@ -197,6 +219,9 @@ type Run struct {
 	SizeBasis     SizeBasis
 	RootPath      string
 	Duration      time.Duration
+	MetadataOps   int64
+	MetadataQPS   float64
+	MetadataLimit float64
 }
 
 // Control is the current control request for a root.
@@ -217,6 +242,7 @@ type DirOutcome struct {
 	Duration      time.Duration
 	Err           error
 	TransientErrs int64
+	Truncated     bool
 	CompletedAt   time.Time
 }
 
@@ -230,6 +256,7 @@ type Progress struct {
 	Bytes      int64
 	Paused     bool
 	Elapsed    time.Duration
+	QPS        float64
 }
 
 // ScanSummary is returned after a scan finishes or aborts.

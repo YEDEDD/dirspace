@@ -79,6 +79,7 @@ type queryDirJSON struct {
 	ScannedAtText   string     `json:"scanned_at_text"`
 	AgeSeconds      int64      `json:"age_seconds"`
 	DurationSeconds float64    `json:"duration_seconds"`
+	Truncated       bool       `json:"truncated"`
 	LastError       string     `json:"last_error,omitempty"`
 }
 
@@ -190,7 +191,11 @@ func buildQueryJSON(svc *service.Service, view *service.View) queryJSON {
 			ScannedAt:       last,
 			ScannedAtText:   formatTimestamp(last),
 			DurationSeconds: d.Duration.Seconds(),
+			Truncated:       d.Truncated,
 			LastError:       d.LastError,
+		}
+		if d.Truncated {
+			entry.SizeText = "≥" + entry.SizeText
 		}
 		if last == nil {
 			entry.SizeText = "n/a"
@@ -296,6 +301,9 @@ func printQuery(w io.Writer, svc *service.Service, view *service.View) {
 		last := d.LastSuccessAt
 		effective := svc.EffectiveStatus(d.DataStatus, last)
 		sizeText := formatSize(size)
+		if d.Truncated {
+			sizeText = "≥" + sizeText
+		}
 		fileText := formatCount(d.FileCount)
 		dirText := formatCount(d.DirCount)
 		status := statusWithContext(effective, last)
@@ -350,6 +358,7 @@ type partialDirJSON struct {
 	DirCount        int64     `json:"dir_count"`
 	SymlinkCount    int64     `json:"symlink_count"`
 	DurationSeconds float64   `json:"duration_seconds"`
+	Truncated       bool      `json:"truncated"`
 	CompletedAt     time.Time `json:"completed_at"`
 }
 
@@ -393,7 +402,7 @@ func buildPartialJSON(view *service.PartialView) partialJSON {
 			SizeText: formatSize(size), AllocBytes: d.AllocBytes,
 			LogicalBytes: d.LogicalBytes, FileCount: d.FileCount,
 			DirCount: d.DirCount, SymlinkCount: d.SymlinkCount,
-			DurationSeconds: d.Duration.Seconds(),
+			DurationSeconds: d.Duration.Seconds(), Truncated: d.Truncated,
 		}
 		if d.LastSuccessAt != nil {
 			entry.CompletedAt = *d.LastSuccessAt
@@ -447,13 +456,111 @@ func printPartial(w io.Writer, view *service.PartialView) {
 		padRight("完成时间", 19))
 	for i, d := range view.Dirs {
 		last := d.LastSuccessAt
+		sizeText := formatSize(dirBytes(d, view.SizeBasis))
+		if d.Truncated {
+			sizeText = "≥" + sizeText
+		}
 		fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s  %s\n",
 			padRight(fmt.Sprintf("%d", i+1), 4),
 			padRight(validText(d.Name), nameWidth),
-			padLeft(formatSize(dirBytes(d, view.SizeBasis)), 12),
+			padLeft(sizeText, 12),
 			padLeft(formatCount(d.FileCount), 14),
 			padLeft(formatCount(d.DirCount), 8),
 			padLeft(formatDuration(d.Duration), 9),
 			padRight(formatTimestamp(last), 19))
 	}
+}
+
+type childJSON struct {
+	Rank         int    `json:"rank"`
+	Path         string `json:"path"`
+	Name         string `json:"name"`
+	Depth        int    `json:"depth"`
+	SizeBytes    int64  `json:"size_bytes"`
+	SizeText     string `json:"size_text"`
+	AllocBytes   int64  `json:"alloc_bytes"`
+	LogicalBytes int64  `json:"logical_bytes"`
+	FileCount    int64  `json:"file_count"`
+	DirCount     int64  `json:"dir_count"`
+	Accuracy     string `json:"accuracy"`
+	AccuracyText string `json:"accuracy_text"`
+	DataStatus   string `json:"data_status"`
+	Truncated    bool   `json:"truncated"`
+}
+
+type childrenJSON struct {
+	Path      string      `json:"path"`
+	ScanRoot  string      `json:"scan_root"`
+	Depth     int         `json:"depth"`
+	SizeBytes int64       `json:"size_bytes"`
+	SizeText  string      `json:"size_text"`
+	Basis     string      `json:"size_basis"`
+	Children  []childJSON `json:"children"`
+	Note      string      `json:"note"`
+}
+
+func indexBytes(e model.DirIndexEntry, basis model.SizeBasis) int64 {
+	if basis == model.BasisLogical {
+		return e.LogicalBytes
+	}
+	return e.AllocBytes
+}
+
+func buildChildrenJSON(view *service.IndexChildrenView) childrenJSON {
+	out := childrenJSON{
+		Path: view.Path, ScanRoot: view.ScanRoot, Basis: basisValue(view.SizeBasis),
+		Children: make([]childJSON, 0, len(view.Dirs)),
+		Note:     "目录索引只保留每层 top K 子目录；更深的路径可能未索引。",
+	}
+	if view.Parent != nil {
+		out.Depth = view.Parent.Depth
+		out.SizeBytes = indexBytes(*view.Parent, view.SizeBasis)
+		out.SizeText = formatSize(out.SizeBytes)
+	}
+	for i, e := range view.Dirs {
+		size := indexBytes(e, view.SizeBasis)
+		out.Children = append(out.Children, childJSON{
+			Rank: i + 1, Path: e.Path, Name: validText(e.Name), Depth: e.Depth,
+			SizeBytes: size, SizeText: formatSize(size), AllocBytes: e.AllocBytes,
+			LogicalBytes: e.LogicalBytes, FileCount: e.FileCount, DirCount: e.DirCount,
+			Accuracy: string(e.Accuracy), AccuracyText: e.Accuracy.Label(),
+			DataStatus: string(e.DataStatus), Truncated: e.Truncated,
+		})
+	}
+	return out
+}
+
+func printChildren(w io.Writer, view *service.IndexChildrenView) {
+	fmt.Fprintln(w, "目录索引下钻")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "查询目录：%s\n", view.Path)
+	fmt.Fprintf(w, "扫描根：%s\n", view.ScanRoot)
+	if view.Parent != nil {
+		fmt.Fprintf(w, "本目录空间：%s（%s）\n", formatSize(indexBytes(*view.Parent, view.SizeBasis)),
+			view.Parent.Accuracy.Label())
+	}
+	if len(view.Dirs) == 0 {
+		fmt.Fprintln(w, "该目录没有索引子目录；可能尚未扫描、索引深度不足，或该目录为空。")
+		return
+	}
+	nameWidth := 30
+	for _, e := range view.Dirs {
+		if n := displayWidth(e.Path); n > nameWidth {
+			nameWidth = n
+		}
+	}
+	fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s\n",
+		padRight("排名", 4), padRight("路径", nameWidth), padLeft("空间", 12),
+		padLeft("文件数", 14), padLeft("子目录", 8), "准确性")
+	for i, e := range view.Dirs {
+		fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s\n",
+			padRight(fmt.Sprintf("%d", i+1), 4),
+			padRight(e.Path, nameWidth),
+			padLeft(formatSize(indexBytes(e, view.SizeBasis)), 12),
+			padLeft(formatCount(e.FileCount), 14),
+			padLeft(formatCount(e.DirCount), 8),
+			e.Accuracy.Label())
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "说明：索引每层只保留 top K 子目录；未出现的深层路径需要提高 index_depth 或按需重算。")
 }

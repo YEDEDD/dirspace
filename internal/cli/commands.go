@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.3.7"
+var Version = "1.5.0"
 
 const (
 	exitOK      = 0
@@ -54,7 +54,7 @@ func parseCommand(positional []string) (command, error) {
 			return command{}, err
 		}
 		return command{name: name, args: rest}, nil
-	case "list", "partial", "status", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
+	case "children", "list", "partial", "status", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
 		"cleanup", "backup", "doctor":
 		if len(rest) > 0 {
 			return command{}, &usageError{fmt.Sprintf("%s 不接受位置参数: %s", name, strings.Join(rest, " "))}
@@ -91,7 +91,7 @@ func validateCommandOptions(cmd command, opts *options) error {
 	allowFull := cmd.name == "refresh" || cmd.name == "scan"
 	allowNew := cmd.name == "scan"
 	allowResume := cmd.name == "scan"
-	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "partial" || cmd.name == "status" ||
+	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "children" || cmd.name == "partial" || cmd.name == "status" ||
 		cmd.name == "scan" || cmd.name == "quick" || cmd.name == "refresh" || cmd.name == "rebuild" ||
 		cmd.name == "pause" || cmd.name == "resume" || cmd.name == "cancel"
 	if opts.once && !allowOnce {
@@ -269,6 +269,22 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 			}
 		} else {
 			printQuery(stdout, svc, view)
+		}
+		return exitOK
+
+	case "children":
+		view, err := svc.Children(ctx, queryPath, 0)
+		if err != nil {
+			printError(stderr, err)
+			return exitRuntime
+		}
+		if opts.json {
+			if err := writeJSON(stdout, buildChildrenJSON(view)); err != nil {
+				fmt.Fprintf(stderr, "输出 JSON 失败: %v\n", err)
+				return exitRuntime
+			}
+		} else {
+			printChildren(stdout, view)
 		}
 		return exitOK
 
@@ -580,6 +596,13 @@ func printConfig(w io.Writer, cfg *config.Config) {
 	fmt.Fprintf(w, "精确全量间隔：%s；快速估算间隔：%s（抽样 %d%%）\n",
 		formatInterval(cfg.Scan.Interval.Duration), formatInterval(cfg.Scan.QuickInterval.Duration),
 		cfg.Scan.QuickSamplePercent)
+	fmt.Fprintf(w, "目录索引：深度 %d，每层 top %d（0 表示关闭）\n",
+		cfg.Scan.IndexDepth, cfg.Scan.IndexTopK)
+	if cfg.Scan.QuickMaxFilesPerTop > 0 {
+		fmt.Fprintf(w, "quick 单目录文件上限：%d（超出标记 partial）\n", cfg.Scan.QuickMaxFilesPerTop)
+	} else {
+		fmt.Fprintln(w, "quick 单目录文件上限：不限制")
+	}
 	fmt.Fprintf(w, "历史保留：%d 天；已删除目录保留：%d 天\n",
 		cfg.Database.RetentionDays, cfg.Database.StaleRetentionDays)
 	fmt.Fprintf(w, "并发：%s（一级目录间并行；大目录内部使用剩余并发）\n", cfg.Performance.Concurrency)
@@ -639,6 +662,7 @@ func printHelp(w io.Writer) {
   （无命令）          等同于 top 10
   top <N>             显示空间排名前 N 个一级目录（默认 10）
   list                显示全部一级目录
+  children            显示目录索引中某个目录的直接子目录（--path 指定）
   partial             显示当前扫描已完成的一级目录（staging，含完整名称）
   status              显示缓存、任务、进度和数据库状态
   config explain      显示最终生效的配置和推导值
@@ -678,6 +702,7 @@ func printHelp(w io.Writer) {
   dirspace
   dirspace top 20
   dirspace list --json
+  dirspace children --path /data/cache-a
   dirspace partial --path /mnt
   dirspace --path /data top 10
   dirspace scan --path /data

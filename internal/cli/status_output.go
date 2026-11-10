@@ -75,25 +75,31 @@ type statusJSON struct {
 	ControlText       string     `json:"control_state_text"`
 	Target            string     `json:"target_directory,omitempty"`
 	LastError         string     `json:"last_error,omitempty"`
+	MetadataOps       int64      `json:"metadata_ops"`
+	MetadataQPS       float64    `json:"metadata_qps"`
+	MetadataQPSLimit  float64    `json:"metadata_qps_limit"`
 }
 
 type runJSON struct {
-	ID              int64      `json:"id"`
-	Mode            string     `json:"mode"`
-	Status          string     `json:"status"`
-	StatusText      string     `json:"status_text"`
-	StartedAt       time.Time  `json:"started_at"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
-	HeartbeatAt     time.Time  `json:"heartbeat_at"`
-	TotalDirs       int        `json:"total_directories"`
-	ProcessedDirs   int        `json:"processed_directories"`
-	Files           int64      `json:"files_seen"`
-	Bytes           int64      `json:"bytes_seen"`
-	CurrentDir      string     `json:"current_directory,omitempty"`
-	DurationSeconds float64    `json:"duration_seconds"`
-	Error           string     `json:"error,omitempty"`
-	Resumed         bool       `json:"resumed"`
-	SizeBasis       string     `json:"size_basis"`
+	ID               int64      `json:"id"`
+	Mode             string     `json:"mode"`
+	Status           string     `json:"status"`
+	StatusText       string     `json:"status_text"`
+	StartedAt        time.Time  `json:"started_at"`
+	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	HeartbeatAt      time.Time  `json:"heartbeat_at"`
+	TotalDirs        int        `json:"total_directories"`
+	ProcessedDirs    int        `json:"processed_directories"`
+	Files            int64      `json:"files_seen"`
+	Bytes            int64      `json:"bytes_seen"`
+	CurrentDir       string     `json:"current_directory,omitempty"`
+	DurationSeconds  float64    `json:"duration_seconds"`
+	Error            string     `json:"error,omitempty"`
+	Resumed          bool       `json:"resumed"`
+	SizeBasis        string     `json:"size_basis"`
+	MetadataOps      int64      `json:"metadata_ops"`
+	MetadataQPS      float64    `json:"metadata_qps"`
+	MetadataQPSLimit float64    `json:"metadata_qps_limit"`
 }
 
 func toRunJSON(run *model.Run) *runJSON {
@@ -105,22 +111,25 @@ func toRunJSON(run *model.Run) *runJSON {
 		duration = time.Since(run.StartedAt)
 	}
 	return &runJSON{
-		ID:              run.ID,
-		Mode:            string(run.Mode),
-		Status:          string(run.Status),
-		StatusText:      runStatusText(run.Status),
-		StartedAt:       run.StartedAt,
-		FinishedAt:      run.FinishedAt,
-		HeartbeatAt:     run.HeartbeatAt,
-		TotalDirs:       run.TotalDirs,
-		ProcessedDirs:   run.ProcessedDirs,
-		Files:           run.TotalFiles,
-		Bytes:           run.TotalBytes,
-		CurrentDir:      validText(run.CurrentDir),
-		DurationSeconds: duration.Seconds(),
-		Error:           run.Error,
-		Resumed:         run.Resumed,
-		SizeBasis:       string(run.SizeBasis),
+		ID:               run.ID,
+		Mode:             string(run.Mode),
+		Status:           string(run.Status),
+		StatusText:       runStatusText(run.Status),
+		StartedAt:        run.StartedAt,
+		FinishedAt:       run.FinishedAt,
+		HeartbeatAt:      run.HeartbeatAt,
+		TotalDirs:        run.TotalDirs,
+		ProcessedDirs:    run.ProcessedDirs,
+		Files:            run.TotalFiles,
+		Bytes:            run.TotalBytes,
+		CurrentDir:       validText(run.CurrentDir),
+		DurationSeconds:  duration.Seconds(),
+		Error:            run.Error,
+		Resumed:          run.Resumed,
+		SizeBasis:        string(run.SizeBasis),
+		MetadataOps:      run.MetadataOps,
+		MetadataQPS:      run.MetadataQPS,
+		MetadataQPSLimit: run.MetadataLimit,
 	}
 }
 
@@ -182,6 +191,9 @@ func buildStatusJSON(view *service.StatusView) statusJSON {
 		ControlText:       controlText(view.Control.State),
 		Target:            targetName,
 		LastError:         lastError,
+		MetadataOps:       view.MetadataOps,
+		MetadataQPS:       view.MetadataQPS,
+		MetadataQPSLimit:  view.MetadataLimit,
 	}
 	if last == nil {
 		out.TotalText = "n/a"
@@ -268,6 +280,11 @@ func printStatus(w io.Writer, view *service.StatusView) {
 			eta := time.Duration(float64(elapsed) / float64(run.ProcessedDirs) * float64(run.TotalDirs-run.ProcessedDirs))
 			fmt.Fprintf(w, "预计剩余：约 %s（按已完成目录平均）\n", formatDuration(eta))
 		}
+		fmt.Fprintf(w, "元数据 QPS：窗口实际 %.1f / 当前限速 %.1f（累计 %s 次）\n",
+			view.MetadataQPS, view.MetadataLimit, formatCount(view.MetadataOps))
+	} else if view.Last != nil && view.MetadataLimit > 0 {
+		fmt.Fprintf(w, "最近任务 QPS：全程平均 %.1f / 限速 %.1f（累计 %s 次）\n",
+			view.MetadataQPS, view.MetadataLimit, formatCount(view.MetadataOps))
 	}
 	if view.Last != nil && (view.Active == nil || view.Last.ID != view.Active.ID) {
 		fmt.Fprintf(w, "最近任务：#%d %s（%s），开始 %s，耗时 %s\n",

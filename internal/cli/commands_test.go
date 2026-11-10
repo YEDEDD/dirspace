@@ -80,6 +80,19 @@ func TestCLIEndToEnd(t *testing.T) {
 		t.Fatalf("top output wrong: %s", stdout)
 	}
 
+	code, stdout, stderr = runCLI(t, "--db", db, "--path", root, "children", "--json")
+	if code != 0 {
+		t.Fatalf("children exit=%d stderr=%s", code, stderr)
+	}
+	output = nil
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("children json: %v\n%s", err, stdout)
+	}
+	children, ok := output["children"].([]any)
+	if !ok || len(children) != 2 {
+		t.Fatalf("children=%v", output["children"])
+	}
+
 	code, stdout, _ = runCLI(t, "--db", db, "--path", root, "status", "--json")
 	if code != 0 {
 		t.Fatalf("status exit=%d", code)
@@ -90,6 +103,16 @@ func TestCLIEndToEnd(t *testing.T) {
 	}
 	if output["data_status"] != "fresh" {
 		t.Fatalf("status=%v", output["data_status"])
+	}
+	if _, ok := output["metadata_qps"]; !ok {
+		t.Fatalf("status missing metadata_qps: %v", output)
+	}
+	if _, ok := output["metadata_qps_limit"]; !ok {
+		t.Fatalf("status missing metadata_qps_limit: %v", output)
+	}
+	code, stdout, _ = runCLI(t, "--db", db, "--path", root, "status")
+	if code != 0 || !strings.Contains(stdout, "QPS") {
+		t.Fatalf("status text missing QPS: %s", stdout)
 	}
 
 	code, stdout, _ = runCLI(t, "--db", db, "rebuild", "--path", filepath.Join(root, "alpha"))

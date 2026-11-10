@@ -18,6 +18,13 @@ scan:
   quick_interval: 6h
   # 快速模式抽样比例。2 表示约 2% 的文件；越大越准、越慢。
   quick_sample_percent: 2
+  # 目录索引：缓存到三级，每层只保留 top20 子目录；0 关闭。
+  # 需要看四级、五级时改成 4 或 5；更深的未命中路径需要重扫。
+  index_depth: 3
+  index_top_k: 20
+  # quick 单个一级目录最多统计的文件数；0 表示不限制。
+  # 超出后该目录标记 partial，空间显示为下限，避免一个超大目录拖死整轮。
+  quick_max_files_per_top: 0
   # 生产环境建议开启：挂载未就绪时拒绝扫描，避免误扫本地盘。
   require_mount_point: true
 

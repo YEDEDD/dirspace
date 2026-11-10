@@ -321,6 +321,15 @@ type ScanConfig struct {
 	QuickInterval Duration `yaml:"quick_interval"`
 	// QuickSamplePercent is the percentage of files sampled by quick mode.
 	QuickSamplePercent int `yaml:"quick_sample_percent"`
+	// IndexDepth controls how many levels of the directory tree are cached in
+	// the drill-down index. Zero disables the index. Deep levels are kept only
+	// for the top IndexTopK children of each indexed parent.
+	IndexDepth int `yaml:"index_depth"`
+	// IndexTopK is the maximum number of children retained per indexed parent.
+	IndexTopK int `yaml:"index_top_k"`
+	// QuickMaxFilesPerTop caps one quick-mode top-level directory. Zero means
+	// unlimited. A capped directory is marked partial and reports a lower bound.
+	QuickMaxFilesPerTop int64 `yaml:"quick_max_files_per_top"`
 	// RequireMountPoint makes a scan fail if RootPath is not a mount target.
 	// It protects against scanning the local root filesystem when an NFS/CFS
 	// mount is missing. Off by default so ordinary local directories still work.
@@ -417,14 +426,17 @@ func DefaultForProfile(name string) *Config {
 			StaleRetentionDays: 7,
 		},
 		Scan: ScanConfig{
-			RootPath:           "/mnt",
-			SizeBasis:          "allocated",
-			Interval:           Duration{168 * time.Hour},
-			QuickInterval:      Duration{6 * time.Hour},
-			QuickSamplePercent: 2,
-			ScanOnStart:        true,
-			StartupDelay:       Duration{15 * time.Second},
-			ResumeInterrupted:  true,
+			RootPath:            "/mnt",
+			SizeBasis:           "allocated",
+			Interval:            Duration{168 * time.Hour},
+			QuickInterval:       Duration{6 * time.Hour},
+			QuickSamplePercent:  2,
+			IndexDepth:          3,
+			IndexTopK:           20,
+			QuickMaxFilesPerTop: 0,
+			ScanOnStart:         true,
+			StartupDelay:        Duration{15 * time.Second},
+			ResumeInterrupted:   true,
 			Inventory: InventoryConfig{
 				Enabled:   false,
 				BatchSize: 1000,
@@ -629,6 +641,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Scan.QuickSamplePercent < 0 || c.Scan.QuickSamplePercent > 100 {
 		return errors.New("scan.quick_sample_percent 必须在 0 到 100 之间")
+	}
+	if c.Scan.IndexDepth < 0 || c.Scan.IndexDepth > 16 {
+		return errors.New("scan.index_depth 必须在 0 到 16 之间（0 表示关闭目录索引）")
+	}
+	if c.Scan.IndexTopK < 1 || c.Scan.IndexTopK > 1000 {
+		return errors.New("scan.index_top_k 必须在 1 到 1000 之间")
+	}
+	if c.Scan.QuickMaxFilesPerTop < 0 {
+		return errors.New("scan.quick_max_files_per_top 不能为负数（0 表示不限制）")
 	}
 	if c.Scan.StartupDelay.Duration < 0 {
 		return errors.New("scan.startup_delay 不能为负数")

@@ -43,14 +43,7 @@ func (s *Scanner) scanTop(ctx context.Context, sess *scanSession, name string) (
 		return out, fmt.Errorf("不是目录: %s", full)
 	}
 	if sess.quick {
-		if err := s.walkQuickDir(ctx, sess, full, 0, &out); err != nil {
-			out.Duration = time.Since(start)
-			out.CompletedAt = time.Now()
-			return out, err
-		}
-		out.Duration = time.Since(start)
-		out.CompletedAt = time.Now()
-		return out, nil
+		return s.scanQuickTop(ctx, sess, name)
 	}
 	if err := s.scanTree(ctx, sess, name, full, &out); err != nil {
 		out.Duration = time.Since(start)

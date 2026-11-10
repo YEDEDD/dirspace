@@ -238,6 +238,81 @@ func (s *Service) Query(ctx context.Context, path string, limit int) (*View, err
 	return view, nil
 }
 
+// IndexChildrenView is a directory-index drill-down result.
+type IndexChildrenView struct {
+	Path      string
+	ScanRoot  string
+	Parent    *model.DirIndexEntry
+	Dirs      []model.DirIndexEntry
+	SizeBasis model.SizeBasis
+}
+
+// Children reads direct children of path from the depth-limited directory
+// index. It never accesses NFS. Path may be the scan root or any indexed
+// descendant. If the path has no index entry yet, the caller should run a
+// targeted drill/rebuild for that subtree.
+func (s *Service) Children(ctx context.Context, path string, limit int) (*IndexChildrenView, error) {
+	requested, err := config.NormalizeAbsolutePath(path)
+	if err != nil {
+		return nil, err
+	}
+	root, err := s.findScannedRoot(ctx, requested)
+	if err != nil {
+		return nil, err
+	}
+	rel := ""
+	if requested != root.Path {
+		rel, err = filepath.Rel(root.Path, requested)
+		if err != nil {
+			return nil, err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "." {
+			rel = ""
+		}
+		if strings.HasPrefix(rel, "../") || rel == ".." {
+			return nil, &NotScannedError{Path: requested}
+		}
+	}
+	var parent *model.DirIndexEntry
+	if rel != "" {
+		entry, getErr := s.Store.GetIndexEntry(ctx, root.ID, rel)
+		if getErr != nil {
+			if errors.Is(getErr, storage.ErrNotFound) {
+				return nil, fmt.Errorf("目录 %s 尚未进入索引；请提高 scan.index_depth 后重新扫描，或对其所属的一级目录执行 dirspace rebuild", requested)
+			}
+			return nil, getErr
+		}
+		parent = entry
+	}
+	dirs, err := s.Store.Children(ctx, root.ID, rel, limit, s.sizeBasis())
+	if err != nil {
+		return nil, err
+	}
+	return &IndexChildrenView{
+		Path: requested, ScanRoot: root.Path, Parent: parent,
+		Dirs: dirs, SizeBasis: s.sizeBasis(),
+	}, nil
+}
+
+func (s *Service) findScannedRoot(ctx context.Context, path string) (*model.Root, error) {
+	cur := path
+	for {
+		root, err := s.Store.GetRoot(ctx, cur)
+		if err == nil {
+			return root, nil
+		}
+		if !errors.Is(err, storage.ErrNotFound) {
+			return nil, err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return nil, &NotScannedError{Path: path}
+		}
+		cur = parent
+	}
+}
+
 // PartialView is the in-progress staging data of a scan run. These rows are
 // deliberately separate from the published top-level cache.
 type PartialView struct {
@@ -321,6 +396,9 @@ type StatusView struct {
 	Server            string
 	FSType            string
 	SizeBasis         model.SizeBasis
+	MetadataOps       int64
+	MetadataQPS       float64
+	MetadataLimit     float64
 }
 
 // Status reads only local database and mount table state.
@@ -372,6 +450,18 @@ func (s *Service) Status(ctx context.Context, path string) (*StatusView, error) 
 		}
 	}
 	view.Last, _ = s.Store.LastRun(ctx, root.ID)
+	if view.Active != nil {
+		view.MetadataOps = view.Active.MetadataOps
+		view.MetadataQPS = view.Active.MetadataQPS
+		view.MetadataLimit = view.Active.MetadataLimit
+	} else if view.Last != nil {
+		view.MetadataOps = view.Last.MetadataOps
+		view.MetadataQPS = view.Last.MetadataQPS
+		view.MetadataLimit = view.Last.MetadataLimit
+	}
+	if view.MetadataLimit == 0 {
+		view.MetadataLimit = float64(s.Cfg.Performance.MaxMetadataQPS)
+	}
 	view.Control, _ = s.Store.GetControl(ctx, root.ID)
 	view.DirCount, _ = s.Store.CountDirs(ctx, root.ID)
 	view.StaleDirs, _ = s.Store.CountStaleDirs(ctx, root.ID)

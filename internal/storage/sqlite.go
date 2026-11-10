@@ -139,11 +139,11 @@ func (s *Store) initialize(ctx context.Context) error {
 		var tables int
 		if err := s.wdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master
 			WHERE type='table' AND name IN
-			('roots','scan_runs','run_dirs','top_dirs','dir_history','hardlink_seen','control','inventory')`).
+			('roots','scan_runs','run_dirs','top_dirs','dir_index','dir_history','hardlink_seen','control','inventory')`).
 			Scan(&tables); err != nil {
 			return fmt.Errorf("检查数据库结构失败: %w", err)
 		}
-		if tables == 8 {
+		if tables == 9 {
 			return nil
 		}
 	}
@@ -357,7 +357,8 @@ func (s *Store) FindRootAncestor(ctx context.Context, path string) (*model.Root,
 const runColumns = `r.id, r.root_id, r.mode, r.status, r.started_at, r.finished_at,
 	r.heartbeat_at, r.total_dirs, r.processed_dirs, r.total_files, r.total_bytes,
 	r.self_alloc_bytes, r.self_logical_bytes, r.self_file_count, r.self_symlink_count,
-	r.self_transient_errors, r.self_completed, r.current_dir, r.error, r.resumed, r.size_basis, r.duration_ms, roots.path`
+	r.self_transient_errors, r.self_completed, r.current_dir, r.error, r.resumed, r.size_basis, r.duration_ms,
+	r.metadata_ops, r.metadata_qps, r.metadata_limit, roots.path`
 
 func scanRun(row rowScanner) (*model.Run, error) {
 	var run model.Run
@@ -372,7 +373,8 @@ func scanRun(row rowScanner) (*model.Run, error) {
 		&heartbeat, &run.TotalDirs, &run.ProcessedDirs, &run.TotalFiles, &run.TotalBytes,
 		&run.SelfAlloc, &run.SelfLogical, &run.SelfFiles, &run.SelfSymlinks,
 		&run.SelfTransient, &selfCompleted,
-		&run.CurrentDir, &run.Error, &resumed, &basis, &duration, &rootPath,
+		&run.CurrentDir, &run.Error, &resumed, &basis, &duration,
+		&run.MetadataOps, &run.MetadataQPS, &run.MetadataLimit, &rootPath,
 	)
 	if err != nil {
 		return nil, err
@@ -399,6 +401,7 @@ type StartOptions struct {
 	SizeBasis      model.SizeBasis
 	Resume         bool
 	ResumeCanceled bool
+	MetadataLimit  float64
 }
 
 // StartRun creates a run, or resumes the newest interrupted compatible run.
@@ -437,7 +440,8 @@ func (s *Store) StartRun(ctx context.Context, rootPath string, opts StartOptions
 				resumableRunStatus(model.RunStatus(existingStatus), opts.ResumeCanceled) {
 				runID = existing
 				if _, err := tx.ExecContext(ctx, `UPDATE scan_runs SET status='running', resumed=1,
-					heartbeat_at=?, finished_at=NULL, error='' WHERE id=?`, now, runID); err != nil {
+					heartbeat_at=?, finished_at=NULL, error='', metadata_limit=? WHERE id=?`,
+					now, opts.MetadataLimit, runID); err != nil {
 					return err
 				}
 				if _, err := tx.ExecContext(ctx, `UPDATE scan_runs SET status='interrupted', finished_at=?,
@@ -471,9 +475,9 @@ func (s *Store) StartRun(ctx context.Context, rootPath string, opts StartOptions
 			return err
 		}
 		res, err := tx.ExecContext(ctx, `INSERT INTO scan_runs
-			(root_id, mode, status, size_basis, started_at, heartbeat_at)
-			VALUES(?, ?, 'running', ?, ?, ?)`,
-			rootID, string(opts.Mode), string(opts.SizeBasis), now, now)
+			(root_id, mode, status, size_basis, started_at, heartbeat_at, metadata_limit)
+			VALUES(?, ?, 'running', ?, ?, ?, ?)`,
+			rootID, string(opts.Mode), string(opts.SizeBasis), now, now, opts.MetadataLimit)
 		if err != nil {
 			return err
 		}
@@ -550,7 +554,7 @@ func (s *Store) SetTotalDirs(ctx context.Context, runID int64, total int) error 
 // CompletedDirs returns successfully staged directories, used for resume.
 func (s *Store) CompletedDirs(ctx context.Context, runID int64) (map[string]model.DirOutcome, error) {
 	rows, err := s.rdb.QueryContext(ctx, `SELECT name, alloc_bytes, logical_bytes, file_count,
-		dir_count, symlink_count, duration_ms, transient_errors, completed_at
+		dir_count, symlink_count, duration_ms, transient_errors, truncated, completed_at
 		FROM run_dirs WHERE run_id=? AND error=''`, runID)
 	if err != nil {
 		return nil, err
@@ -560,11 +564,13 @@ func (s *Store) CompletedDirs(ctx context.Context, runID int64) (map[string]mode
 	for rows.Next() {
 		var out model.DirOutcome
 		var duration, completed int64
+		var truncated int
 		if err := rows.Scan(&out.Name, &out.AllocBytes, &out.LogicalBytes, &out.FileCount,
-			&out.DirCount, &out.SymlinkCount, &duration, &out.TransientErrs, &completed); err != nil {
+			&out.DirCount, &out.SymlinkCount, &duration, &out.TransientErrs, &truncated, &completed); err != nil {
 			return nil, err
 		}
 		out.Duration = time.Duration(duration) * time.Millisecond
+		out.Truncated = truncated != 0
 		out.CompletedAt = fromMillis(completed)
 		result[out.Name] = out
 	}
@@ -593,18 +599,22 @@ func (s *Store) SaveDirResult(ctx context.Context, runID int64, out model.DirOut
 		errText = out.Err.Error()
 	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		truncated := 0
+		if out.Truncated {
+			truncated = 1
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO run_dirs
 			(run_id, name, alloc_bytes, logical_bytes, file_count, dir_count, symlink_count,
-			 duration_ms, transient_errors, error, completed_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?)
+			 duration_ms, transient_errors, truncated, error, completed_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(run_id, name) DO UPDATE SET
 			 alloc_bytes=excluded.alloc_bytes, logical_bytes=excluded.logical_bytes,
 			 file_count=excluded.file_count, dir_count=excluded.dir_count,
 			 symlink_count=excluded.symlink_count, duration_ms=excluded.duration_ms,
-			 transient_errors=excluded.transient_errors, error=excluded.error,
-			 completed_at=excluded.completed_at`,
+			 transient_errors=excluded.transient_errors, truncated=excluded.truncated,
+			 error=excluded.error, completed_at=excluded.completed_at`,
 			runID, out.Name, out.AllocBytes, out.LogicalBytes, out.FileCount, out.DirCount,
-			out.SymlinkCount, out.Duration.Milliseconds(), out.TransientErrs, errText, completed); err != nil {
+			out.SymlinkCount, out.Duration.Milliseconds(), out.TransientErrs, truncated, errText, completed); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `UPDATE scan_runs SET
@@ -633,11 +643,11 @@ func (s *Store) SaveRootSelf(ctx context.Context, runID int64, out model.DirOutc
 
 // Heartbeat updates liveness and in-progress counters. It returns false when
 // the run is no longer active (for example it was marked interrupted).
-func (s *Store) Heartbeat(ctx context.Context, runID int64, currentDir string, processed, files, bytes int64) (bool, error) {
+func (s *Store) Heartbeat(ctx context.Context, runID int64, currentDir string, processed, files, bytes, metadataOps int64, metadataQPS, metadataLimit float64) (bool, error) {
 	res, err := s.wdb.ExecContext(ctx, `UPDATE scan_runs SET heartbeat_at=?, current_dir=?,
-		processed_dirs=?, total_files=?, total_bytes=?
+		processed_dirs=?, total_files=?, total_bytes=?, metadata_ops=?, metadata_qps=?, metadata_limit=?
 		WHERE id=? AND status IN ('running','paused')`,
-		nowMillis(), currentDir, processed, files, bytes, runID)
+		nowMillis(), currentDir, processed, files, bytes, metadataOps, metadataQPS, metadataLimit, runID)
 	if err != nil {
 		return false, err
 	}
@@ -646,6 +656,15 @@ func (s *Store) Heartbeat(ctx context.Context, runID int64, currentDir string, p
 		return false, err
 	}
 	return n > 0, nil
+}
+
+// SetRunMetadata stores the final observed metadata counter and rate. It is
+// called before completion so even scans shorter than one heartbeat window
+// report a useful QPS in status.
+func (s *Store) SetRunMetadata(ctx context.Context, runID, metadataOps int64, metadataQPS, metadataLimit float64) error {
+	_, err := s.wdb.ExecContext(ctx, `UPDATE scan_runs SET metadata_ops=?, metadata_qps=?, metadata_limit=? WHERE id=?`,
+		metadataOps, metadataQPS, metadataLimit, runID)
+	return err
 }
 
 // ClaimHardlink atomically records an inode in the run-wide hardlink set.
@@ -839,12 +858,13 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single, preserveMi
 			symlinks  int64
 			duration  int64
 			transient int64
+			truncated int
 			errText   string
 			completed int64
 		}
 		var staged []dirRow
 		rows, err := tx.QueryContext(ctx, `SELECT name, alloc_bytes, logical_bytes, file_count,
-			dir_count, symlink_count, duration_ms, transient_errors, error, completed_at
+			dir_count, symlink_count, duration_ms, transient_errors, truncated, error, completed_at
 			FROM run_dirs WHERE run_id=?`, runID)
 		if err != nil {
 			return err
@@ -852,7 +872,7 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single, preserveMi
 		for rows.Next() {
 			var d dirRow
 			if err := rows.Scan(&d.name, &d.alloc, &d.logical, &d.files, &d.dirs, &d.symlinks,
-				&d.duration, &d.transient, &d.errText, &d.completed); err != nil {
+				&d.duration, &d.transient, &d.truncated, &d.errText, &d.completed); err != nil {
 				rows.Close()
 				return err
 			}
@@ -886,6 +906,7 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single, preserveMi
 		incremental := mode == string(model.ModeIncremental)
 		globalApprox := globalSampled || resumed != 0 || selfTransient > 0
 		hasTransient := false
+		hasTruncated := false
 		var errorMessages []string
 		stagedNames := map[string]bool{}
 		successNames := make([]string, 0, len(staged))
@@ -919,8 +940,13 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single, preserveMi
 			if d.transient > 0 {
 				hasTransient = true
 			}
+			if d.truncated != 0 {
+				hasTruncated = true
+			}
 			accuracy := "exact"
-			if globalSampled {
+			if d.truncated != 0 {
+				accuracy = "approximate"
+			} else if globalSampled {
 				accuracy = "sampled"
 			} else if globalApprox || d.transient > 0 {
 				accuracy = "approximate"
@@ -929,19 +955,24 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single, preserveMi
 			if completed == 0 {
 				completed = nowMS
 			}
+			dataStatus := "fresh"
+			if d.truncated != 0 {
+				dataStatus = "partial"
+			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO top_dirs
 				(root_id, name, alloc_bytes, logical_bytes, file_count, dir_count, symlink_count,
-				 duration_ms, data_status, accuracy, last_success_at, last_attempt_at, last_error, updated_at)
-				VALUES(?,?,?,?,?,?,?,?, 'fresh', ?, ?, ?, '', ?)
+				 duration_ms, truncated, data_status, accuracy, last_success_at, last_attempt_at, last_error, updated_at)
+				VALUES(?,?,?,?,?,?,?,?,?, ?, ?, ?, ?, '', ?)
 				ON CONFLICT(root_id, name) DO UPDATE SET
 				 alloc_bytes=excluded.alloc_bytes, logical_bytes=excluded.logical_bytes,
 				 file_count=excluded.file_count, dir_count=excluded.dir_count,
 				 symlink_count=excluded.symlink_count, duration_ms=excluded.duration_ms,
-				 data_status='fresh', accuracy=excluded.accuracy,
+				 truncated=excluded.truncated, data_status=excluded.data_status,
+				 accuracy=excluded.accuracy,
 				 last_success_at=excluded.last_success_at, last_attempt_at=excluded.last_attempt_at,
 				 last_error='', updated_at=excluded.updated_at`,
 				rootID, d.name, d.alloc, d.logical, d.files, d.dirs, d.symlinks,
-				d.duration, accuracy, completed, nowMS, nowMS); err != nil {
+				d.duration, d.truncated, dataStatus, accuracy, completed, nowMS, nowMS); err != nil {
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO dir_history
@@ -1005,11 +1036,13 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single, preserveMi
 		// The root's subdirectory count includes first-level rows themselves.
 		totalDirs += int64(dirCount)
 
-		approximate := globalApprox || incremental || hasTransient || failures > 0
+		approximate := globalApprox || incremental || hasTransient || hasTruncated || failures > 0
 		runStatus := string(model.RunCompleted)
 		rootStatus := string(model.DataFresh)
 		rootAccuracy := model.AccuracyExact
-		if globalSampled {
+		if hasTruncated {
+			rootAccuracy = model.AccuracyApproximate
+		} else if globalSampled {
 			rootAccuracy = model.AccuracySampled
 		} else if incremental && failures == 0 {
 			rootAccuracy = model.AccuracyIncremental
@@ -1025,6 +1058,8 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single, preserveMi
 			runStatus = string(model.RunFailed)
 			rootStatus = string(model.DataFailed)
 			rootAccuracy = model.AccuracyApproximate
+		case hasTruncated:
+			rootStatus = string(model.DataPartial)
 		}
 		if single {
 			runStatus = string(model.RunCompleted)
@@ -1256,20 +1291,22 @@ func (s *Store) CheckControl(ctx context.Context, rootID int64) (model.ControlSt
 // Cached directories
 
 const dirColumns = `id, root_id, name, alloc_bytes, logical_bytes, file_count, dir_count,
-	symlink_count, duration_ms, data_status, accuracy, last_success_at, last_attempt_at, last_error`
+	symlink_count, duration_ms, truncated, data_status, accuracy, last_success_at, last_attempt_at, last_error`
 
 func scanDir(row rowScanner) (*model.DirStat, error) {
 	var d model.DirStat
 	var status, accuracy string
 	var duration int64
+	var truncated int
 	var lastSuccess, lastAttempt sql.NullInt64
 	err := row.Scan(&d.ID, &d.RootID, &d.Name, &d.AllocBytes, &d.LogicalBytes, &d.FileCount,
-		&d.DirCount, &d.SymlinkCount, &duration, &status, &accuracy, &lastSuccess,
+		&d.DirCount, &d.SymlinkCount, &duration, &truncated, &status, &accuracy, &lastSuccess,
 		&lastAttempt, &d.LastError)
 	if err != nil {
 		return nil, err
 	}
 	d.Duration = time.Duration(duration) * time.Millisecond
+	d.Truncated = truncated != 0
 	d.DataStatus = model.DataStatus(status)
 	d.Accuracy = model.Accuracy(accuracy)
 	d.LastSuccessAt = nullableTime(lastSuccess)
@@ -1480,7 +1517,7 @@ func (s *Store) StagedDirs(ctx context.Context, runID int64, limit int, basis mo
 		orderBy = "logical_bytes"
 	}
 	query := `SELECT name, alloc_bytes, logical_bytes, file_count, dir_count,
-		symlink_count, duration_ms, completed_at
+		symlink_count, duration_ms, truncated, completed_at
 		FROM run_dirs WHERE run_id=? AND error='' ORDER BY ` + orderBy + ` DESC, name ASC`
 	args := []any{runID}
 	if limit > 0 {
@@ -1496,17 +1533,126 @@ func (s *Store) StagedDirs(ctx context.Context, runID int64, limit int, basis mo
 	for rows.Next() {
 		var d model.DirStat
 		var durationMS, completedMS int64
+		var truncated int
 		if err := rows.Scan(&d.Name, &d.AllocBytes, &d.LogicalBytes, &d.FileCount,
-			&d.DirCount, &d.SymlinkCount, &durationMS, &completedMS); err != nil {
+			&d.DirCount, &d.SymlinkCount, &durationMS, &truncated, &completedMS); err != nil {
 			return nil, err
 		}
 		d.ID = runID
+		d.Truncated = truncated != 0
 		d.Duration = time.Duration(durationMS) * time.Millisecond
 		t := time.UnixMilli(completedMS)
 		d.LastSuccessAt = &t
 		d.LastAttemptAt = &t
 		d.DataStatus = model.DataFresh
+		if d.Truncated {
+			d.DataStatus = model.DataPartial
+		}
 		result = append(result, d)
 	}
 	return result, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// Depth-limited directory index
+
+const dirIndexColumns = `root_id, path, parent_path, name, depth, alloc_bytes,
+	logical_bytes, file_count, dir_count, symlink_count, data_status, accuracy,
+	truncated, updated_at`
+
+func scanDirIndex(row rowScanner) (*model.DirIndexEntry, error) {
+	var e model.DirIndexEntry
+	var status, accuracy string
+	var truncated int
+	var updated int64
+	err := row.Scan(&e.RootID, &e.Path, &e.ParentPath, &e.Name, &e.Depth,
+		&e.AllocBytes, &e.LogicalBytes, &e.FileCount, &e.DirCount, &e.SymlinkCount,
+		&status, &accuracy, &truncated, &updated)
+	if err != nil {
+		return nil, err
+	}
+	e.DataStatus = model.DataStatus(status)
+	e.Accuracy = model.Accuracy(accuracy)
+	e.Truncated = truncated != 0
+	e.UpdatedAt = fromMillis(updated)
+	return &e, nil
+}
+
+// ReplaceDirIndex atomically replaces the cached directory index for a root.
+func (s *Store) ReplaceDirIndex(ctx context.Context, rootID, runID int64, entries []model.DirIndexEntry) error {
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM dir_index WHERE root_id=?`, rootID); err != nil {
+			return err
+		}
+		stmt, err := tx.PrepareContext(ctx, `INSERT INTO dir_index
+			(root_id, path, parent_path, name, depth, alloc_bytes, logical_bytes,
+			 file_count, dir_count, symlink_count, data_status, accuracy, truncated,
+			 run_id, updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for _, e := range entries {
+			truncated := 0
+			if e.Truncated {
+				truncated = 1
+			}
+			if _, err := stmt.ExecContext(ctx, rootID, e.Path, e.ParentPath, e.Name,
+				e.Depth, e.AllocBytes, e.LogicalBytes, e.FileCount, e.DirCount,
+				e.SymlinkCount, string(e.DataStatus), string(e.Accuracy), truncated,
+				runID, toMillis(e.UpdatedAt)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// Children returns indexed direct children of parentPath, largest first.
+// parentPath is relative to the root and empty for top-level entries.
+func (s *Store) Children(ctx context.Context, rootID int64, parentPath string, limit int, basis model.SizeBasis) ([]model.DirIndexEntry, error) {
+	orderBy := "alloc_bytes"
+	if basis == model.BasisLogical {
+		orderBy = "logical_bytes"
+	}
+	query := `SELECT ` + dirIndexColumns + ` FROM dir_index
+		WHERE root_id=? AND parent_path=? AND data_status IN ('fresh','partial')
+		ORDER BY ` + orderBy + ` DESC, name ASC`
+	args := []any{rootID, parentPath}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []model.DirIndexEntry
+	for rows.Next() {
+		e, err := scanDirIndex(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *e)
+	}
+	return result, rows.Err()
+}
+
+// GetIndexEntry returns one indexed path.
+func (s *Store) GetIndexEntry(ctx context.Context, rootID int64, path string) (*model.DirIndexEntry, error) {
+	e, err := scanDirIndex(s.rdb.QueryRowContext(ctx, `SELECT `+dirIndexColumns+`
+		FROM dir_index WHERE root_id=? AND path=?`, rootID, path))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return e, err
+}
+
+// CountIndexedDirs returns the number of cached index entries for a root.
+func (s *Store) CountIndexedDirs(ctx context.Context, rootID int64) (int, error) {
+	var n int
+	err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM dir_index WHERE root_id=?`, rootID).Scan(&n)
+	return n, err
 }
