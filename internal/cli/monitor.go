@@ -387,6 +387,12 @@ func assessMonitor(r monitorReport) monitorVerdict {
 	}
 	cfg := r.Config
 	rt := r.Runtime
+	staleLimit := cfg.MaxMetadataQPS > 0 && rt.QPSLimit > 0 && int(rt.QPSLimit) != cfg.MaxMetadataQPS
+	if staleLimit {
+		v.Reasons = append(v.Reasons, fmt.Sprintf(
+			"当前任务启动时限速 %.0f，配置现在是 %d；新配置只对下一个任务生效",
+			rt.QPSLimit, cfg.MaxMetadataQPS))
+	}
 	var high, low bool
 
 	if cfg.MaxHostCPUPercent > 0 && rt.HostCPUPercent >= cfg.MaxHostCPUPercent {
@@ -414,12 +420,12 @@ func assessMonitor(r monitorReport) monitorVerdict {
 		low = true
 		v.Reasons = append(v.Reasons, fmt.Sprintf("进程 CPU %.1f%% 已接近配置上限 %d%%，但 QPS 未到限速", rt.ProcessCPUPercent, cfg.MaxCPUPercent))
 	}
-	if rt.QPSLimit > 0 && rt.QPS >= 0.85*rt.QPSLimit && rt.HostCPUPercent < 70 &&
+	if !staleLimit && rt.QPSLimit > 0 && rt.QPS >= 0.85*rt.QPSLimit && rt.HostCPUPercent < 70 &&
 		(cfg.MaxLoad1 <= 0 || rt.HostLoad1 < cfg.MaxLoad1) {
 		low = true
 		v.Reasons = append(v.Reasons, fmt.Sprintf("QPS %.0f 已接近限速 %.0f，但主机 CPU/Load 还有余量", rt.QPS, rt.QPSLimit))
 	}
-	if rt.QPSLimit > 0 && rt.QPS > 0 && rt.QPS < 0.5*rt.QPSLimit && rt.HostCPUPercent < 50 &&
+	if !staleLimit && rt.QPSLimit > 0 && rt.QPS > 0 && rt.QPS < 0.5*rt.QPSLimit && rt.HostCPUPercent < 50 &&
 		(cfg.MaxCPUPercent <= 0 || rt.ProcessCPUPercent < 0.5*float64(cfg.MaxCPUPercent)) {
 		low = true
 		v.Reasons = append(v.Reasons, "QPS 和进程 CPU 都明显低于配置上限")
@@ -434,7 +440,11 @@ func assessMonitor(r monitorReport) monitorVerdict {
 		v.Summary = "配置可能偏低，资源还有余量"
 		v.Suggestions = append(v.Suggestions, "小步提高 max_metadata_qps 或 max_cpu_percent，每次观察 5 到 10 分钟")
 	}
-	if !high && !low {
+	if !high && !low && staleLimit {
+		v.Level = "unknown"
+		v.Summary = "当前任务仍在使用启动时的旧限速，配置改动尚未生效"
+		v.Suggestions = append(v.Suggestions, "等当前任务结束后启动新任务，再用 monitor 判断新 QPS 是否合适")
+	} else if !high && !low {
 		v.Level = "ok"
 		v.Summary = "当前配置基本合适"
 	}
@@ -487,7 +497,7 @@ func printMonitor(w io.Writer, r monitorReport) {
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  进程内存：%s", config.FormatBytes(r.Runtime.ProcessRSS))
 	if r.Runtime.MemoryCurrent > 0 {
-		fmt.Fprintf(w, " / cgroup 当前 %s", config.FormatBytes(r.Runtime.MemoryCurrent))
+		fmt.Fprintf(w, " / 服务 cgroup 当前 %s", config.FormatBytes(r.Runtime.MemoryCurrent))
 	}
 	if r.Runtime.MemoryHigh > 0 {
 		fmt.Fprintf(w, " / high %s", config.FormatBytes(r.Runtime.MemoryHigh))
@@ -507,7 +517,10 @@ func printMonitor(w io.Writer, r monitorReport) {
 			fmt.Fprintf(w, "，当前 %s", r.Runtime.CurrentDir)
 		}
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  QPS：%.0f / 限速 %.0f\n", r.Runtime.QPS, r.Runtime.QPSLimit)
+		fmt.Fprintf(w, "  QPS：%.0f / 任务启动时限速 %.0f\n", r.Runtime.QPS, r.Runtime.QPSLimit)
+		if r.Config.MaxMetadataQPS > 0 && int(r.Runtime.QPSLimit) != r.Config.MaxMetadataQPS {
+			fmt.Fprintf(w, "  当前配置 QPS：%d（等待新任务生效）\n", r.Config.MaxMetadataQPS)
+		}
 	} else {
 		fmt.Fprintf(w, "  任务：空闲（最近 QPS %.0f / %.0f）\n", r.Runtime.QPS, r.Runtime.QPSLimit)
 	}

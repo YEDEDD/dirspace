@@ -363,3 +363,19 @@ func TestStatusShowsActiveChildRootTask(t *testing.T) {
 		t.Fatalf("monitor did not pick child task %s:\n%s", child, stdout)
 	}
 }
+
+func TestAssessMonitorStaleRunLimit(t *testing.T) {
+	v := assessMonitor(monitorReport{
+		Config: monitorConfig{MaxMetadataQPS: 2000, MaxCPUPercent: 40},
+		Runtime: monitorRuntime{
+			Active: true, QPS: 928, QPSLimit: 1000, ProcessCPUPercent: 24,
+			HostCPUPercent: 18, HostLoad1: 4,
+		},
+	})
+	if v.Level != "unknown" {
+		t.Fatalf("expected unknown for stale run limit, got %+v", v)
+	}
+	if len(v.Reasons) == 0 || !strings.Contains(v.Reasons[0], "启动时限速") {
+		t.Fatalf("missing stale-limit reason: %+v", v)
+	}
+}
