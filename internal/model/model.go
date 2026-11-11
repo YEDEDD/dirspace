@@ -279,6 +279,8 @@ type ScanSummary struct {
 	DoneDirs     int
 	FailedDirs   int
 	Resumed      bool
+	ShardIndex   int
+	ShardCount   int
 	Errors       []string
 }
 

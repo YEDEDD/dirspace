@@ -318,6 +318,8 @@ type scanJSON struct {
 	DirCount          int64     `json:"dir_count"`
 	Resumed           bool      `json:"resumed"`
 	SizeBasis         string    `json:"size_basis"`
+	ShardIndex        int       `json:"shard_index,omitempty"`
+	ShardCount        int       `json:"shard_count,omitempty"`
 	Errors            []string  `json:"errors,omitempty"`
 }
 
@@ -357,6 +359,8 @@ func buildScanJSON(summary *model.ScanSummary) scanJSON {
 		DirCount:          summary.DirCount,
 		Resumed:           summary.Resumed,
 		SizeBasis:         basisValue(summary.SizeBasis),
+		ShardIndex:        summary.ShardIndex,
+		ShardCount:        summary.ShardCount,
 		Errors:            summary.Errors,
 	}
 }
@@ -403,6 +407,10 @@ func printScanSummary(w io.Writer, summary *model.ScanSummary) {
 	fmt.Fprintf(w, "准确性：%s\n", summary.Accuracy.Label())
 	if summary.Resumed {
 		fmt.Fprintln(w, "说明：本次任务包含断点续扫数据，因此整体标记为近似。")
+	}
+	if summary.ShardCount > 1 {
+		fmt.Fprintf(w, "分片：%d/%d，本库只是分片结果，需用 dirspace merge 合并后才能作为完整根。\n",
+			summary.ShardIndex, summary.ShardCount)
 	}
 	if len(summary.Errors) > 0 {
 		fmt.Fprintln(w, "错误：")

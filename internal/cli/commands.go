@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.7.0"
+var Version = "1.8.0"
 
 const (
 	exitOK      = 0
@@ -54,7 +54,7 @@ func parseCommand(positional []string) (command, error) {
 			return command{}, err
 		}
 		return command{name: name, args: rest}, nil
-	case "children", "list", "partial", "status", "size", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
+	case "children", "list", "partial", "status", "size", "fs-usage", "merge", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
 		"cleanup", "backup", "doctor":
 		if len(rest) > 0 {
 			return command{}, &usageError{fmt.Sprintf("%s 不接受位置参数: %s", name, strings.Join(rest, " "))}
@@ -91,7 +91,7 @@ func validateCommandOptions(cmd command, opts *options) error {
 	allowFull := cmd.name == "refresh" || cmd.name == "scan"
 	allowNew := cmd.name == "scan"
 	allowResume := cmd.name == "scan"
-	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "children" || cmd.name == "partial" || cmd.name == "status" || cmd.name == "size" ||
+	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "children" || cmd.name == "partial" || cmd.name == "status" || cmd.name == "size" || cmd.name == "fs-usage" || cmd.name == "merge" ||
 		cmd.name == "scan" || cmd.name == "quick" || cmd.name == "refresh" || cmd.name == "rebuild" ||
 		cmd.name == "pause" || cmd.name == "resume" || cmd.name == "cancel"
 	if opts.once && !allowOnce {
@@ -126,6 +126,15 @@ func validateCommandOptions(cmd command, opts *options) error {
 	}
 	if opts.exact && cmd.name != "size" {
 		return &usageError{"--exact 仅用于 size"}
+	}
+	if opts.shard != "" && cmd.name != "scan" && cmd.name != "refresh" {
+		return &usageError{"--shard 仅用于 scan 或 refresh"}
+	}
+	if opts.shard != "" && opts.newOnly {
+		return &usageError{"--shard 不能和 --new 一起使用"}
+	}
+	if len(opts.inputs) > 0 && cmd.name != "merge" {
+		return &usageError{"--inputs 仅用于 merge"}
 	}
 	if opts.path != "" && !allowPath {
 		return &usageError{"--path 仅用于查询、扫描或任务控制命令；daemon 多根请配置 extra_roots"}
@@ -294,6 +303,53 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 		}
 		return exitOK
 
+	case "merge":
+		if opts.dbPath == "" {
+			fmt.Fprintln(stderr, "参数错误: merge 需要 --db <合并后的数据库>")
+			return exitUsage
+		}
+		if len(opts.inputs) == 0 {
+			fmt.Fprintln(stderr, "参数错误: merge 需要 --inputs <分片1,分片2,...>")
+			return exitUsage
+		}
+		root, err := svc.Merge(ctx, opts.dbPath, queryPath, opts.inputs)
+		if err != nil {
+			printError(stderr, err)
+			return exitRuntime
+		}
+		view, err := svc.Size(ctx, root.Path, false)
+		if err != nil {
+			printError(stderr, err)
+			return exitRuntime
+		}
+		if opts.json {
+			if err := writeJSON(stdout, buildSizeJSON(view)); err != nil {
+				fmt.Fprintf(stderr, "输出 JSON 失败: %v\n", err)
+				return exitRuntime
+			}
+		} else {
+			fmt.Fprintf(stdout, "合并完成：%d 个分片 -> %s\n\n", len(opts.inputs), opts.dbPath)
+			printSize(stdout, view)
+			fmt.Fprintln(stdout, "注意：当前合并按分片求和，跨分片硬链接尚未去重；存在跨分片硬链接时不能宣称精确。")
+		}
+		return exitOK
+
+	case "fs-usage":
+		usage, err := svc.FSUsage(ctx, queryPath)
+		if err != nil {
+			printError(stderr, err)
+			return exitRuntime
+		}
+		if opts.json {
+			if err := writeJSON(stdout, buildFSUsageJSON(usage)); err != nil {
+				fmt.Fprintf(stderr, "输出 JSON 失败: %v\n", err)
+				return exitRuntime
+			}
+		} else {
+			printFSUsage(stdout, usage)
+		}
+		return exitOK
+
 	case "size":
 		view, err := svc.Size(ctx, queryPath, opts.exact)
 		if err != nil {
@@ -372,6 +428,14 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 			Resume:         opts.resume,
 			ResumeCanceled: opts.resume,
 			Progress:       progress,
+		}
+		if opts.shard != "" {
+			index, count, err := parseShard(opts.shard)
+			if err != nil {
+				fmt.Fprintf(stderr, "参数错误: %v\n", err)
+				return exitUsage
+			}
+			scanOpts.ShardIndex, scanOpts.ShardCount = index, count
 		}
 		if opts.full {
 			scanOpts.Mode = model.ModeFull
@@ -696,6 +760,8 @@ func printHelp(w io.Writer) {
   list                显示全部一级目录
   children            显示目录索引中某个目录的直接子目录（--path 指定）
   size                查询一个目录的已缓存大小；--exact 未命中时精扫该目录
+  fs-usage            查询整个挂载点的容量、已用和可用空间（statfs）
+  merge               合并多个分片数据库（--db 目标库，--inputs 分片列表）
   partial             显示本轮已完成目录，未完成的沿用上次结果（--staging-only 只看本轮）
   status              显示缓存、任务、进度和数据库状态
   config explain      显示最终生效的配置和推导值
@@ -724,6 +790,8 @@ func printHelp(w io.Writer) {
   --resume                断点续扫（scan）
   --staging-only          只显示本轮 staging，不与上次结果合并（partial）
   --exact                 未命中缓存时精确扫描目标目录作为独立根（size）
+  --shard INDEX/COUNT     只扫描目标子树的一部分，结果需 merge（scan/refresh）
+  --inputs <文件列表>     逗号分隔的分片数据库（merge）
   --once                  只运行一轮（daemon）
   --days <N>              清理早于 N 天的历史（cleanup）
   --vacuum                清理后 VACUUM（cleanup）
@@ -740,6 +808,8 @@ func printHelp(w io.Writer) {
   dirspace children --path /data/cache-a
   dirspace size --path /data/cache-a
   dirspace size --path /data/cache-a --exact
+  dirspace fs-usage --path /data
+  dirspace merge --path /data --db /var/lib/dirspace/merged.db --inputs shard-0.db,shard-1.db
   dirspace partial --path /mnt
   dirspace partial --path /mnt --staging-only
   dirspace --path /data top 10

@@ -1578,30 +1578,47 @@ func scanDirIndex(row rowScanner) (*model.DirIndexEntry, error) {
 	return &e, nil
 }
 
+// MarkRootPartial records that a root aggregate contains only one shard of a
+// larger scan. The root can still be queried, but its total is incomplete.
+func (s *Store) MarkRootPartial(ctx context.Context, rootID int64) error {
+	_, err := s.wdb.ExecContext(ctx, `UPDATE roots SET status='partial', updated_at=? WHERE id=?`,
+		nowMillis(), rootID)
+	return err
+}
+
 // ReplaceDirIndex atomically replaces the cached directory index for a root.
 func (s *Store) ReplaceDirIndex(ctx context.Context, rootID, runID int64, entries []model.DirIndexEntry) error {
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM dir_index WHERE root_id=?`, rootID); err != nil {
 			return err
 		}
-		stmt, err := tx.PrepareContext(ctx, `INSERT INTO dir_index
-			(root_id, path, parent_path, name, depth, alloc_bytes, logical_bytes,
-			 file_count, dir_count, symlink_count, data_status, accuracy, truncated,
-			 run_id, updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-		if err != nil {
-			return err
-		}
-		defer stmt.Close()
-		for _, e := range entries {
-			truncated := 0
-			if e.Truncated {
-				truncated = 1
+		const batchSize = 200
+		for start := 0; start < len(entries); start += batchSize {
+			end := start + batchSize
+			if end > len(entries) {
+				end = len(entries)
 			}
-			if _, err := stmt.ExecContext(ctx, rootID, e.Path, e.ParentPath, e.Name,
-				e.Depth, e.AllocBytes, e.LogicalBytes, e.FileCount, e.DirCount,
-				e.SymlinkCount, string(e.DataStatus), string(e.Accuracy), truncated,
-				runID, toMillis(e.UpdatedAt)); err != nil {
+			var query strings.Builder
+			query.WriteString(`INSERT INTO dir_index
+				(root_id, path, parent_path, name, depth, alloc_bytes, logical_bytes,
+				 file_count, dir_count, symlink_count, data_status, accuracy, truncated,
+				 run_id, updated_at) VALUES `)
+			args := make([]any, 0, (end-start)*15)
+			for i, e := range entries[start:end] {
+				if i > 0 {
+					query.WriteByte(',')
+				}
+				query.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+				truncated := 0
+				if e.Truncated {
+					truncated = 1
+				}
+				args = append(args, rootID, e.Path, e.ParentPath, e.Name,
+					e.Depth, e.AllocBytes, e.LogicalBytes, e.FileCount, e.DirCount,
+					e.SymlinkCount, string(e.DataStatus), string(e.Accuracy), truncated,
+					runID, toMillis(e.UpdatedAt))
+			}
+			if _, err := tx.ExecContext(ctx, query.String(), args...); err != nil {
 				return err
 			}
 		}

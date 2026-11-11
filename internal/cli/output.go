@@ -521,6 +521,42 @@ func printPartial(w io.Writer, view *service.PartialView) {
 	}
 }
 
+type fsUsageJSON struct {
+	Path      string `json:"path"`
+	FSType    string `json:"fs_type"`
+	Total     uint64 `json:"total_bytes"`
+	Used      uint64 `json:"used_bytes"`
+	Free      uint64 `json:"free_bytes"`
+	Available uint64 `json:"available_bytes"`
+	BlockSize int64  `json:"block_size"`
+	TotalText string `json:"total_text"`
+	UsedText  string `json:"used_text"`
+	FreeText  string `json:"free_text"`
+}
+
+func buildFSUsageJSON(usage *service.FSUsage) fsUsageJSON {
+	return fsUsageJSON{
+		Path: usage.Path, FSType: usage.FSType,
+		Total: usage.Total, Used: usage.Used, Free: usage.Free,
+		Available: usage.Available, BlockSize: usage.BlockSize,
+		TotalText: formatSize(int64(usage.Total)), UsedText: formatSize(int64(usage.Used)),
+		FreeText: formatSize(int64(usage.Free)),
+	}
+}
+
+func printFSUsage(w io.Writer, usage *service.FSUsage) {
+	fmt.Fprintln(w, "文件系统容量")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "路径：%s\n", validText(usage.Path))
+	fmt.Fprintf(w, "类型：%s\n", validText(usage.FSType))
+	fmt.Fprintf(w, "总容量：%s\n", formatSize(int64(usage.Total)))
+	fmt.Fprintf(w, "已用：%s\n", formatSize(int64(usage.Used)))
+	fmt.Fprintf(w, "空闲：%s\n", formatSize(int64(usage.Free)))
+	fmt.Fprintf(w, "可用：%s\n", formatSize(int64(usage.Available)))
+	fmt.Fprintf(w, "块大小：%d\n", usage.BlockSize)
+	fmt.Fprintln(w, "说明：这是整个文件系统的容量，不是目录大小；目录大小请用 size。")
+}
+
 type sizeJSON struct {
 	Path          string     `json:"path"`
 	ScanRoot      string     `json:"scan_root"`

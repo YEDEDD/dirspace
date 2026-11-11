@@ -16,6 +16,8 @@ GitHub: <https://github.com/YEDEDD/dirspace>
 - 已删除目录默认从排名中隐藏，并按 `stale_retention_days` 清理
 - 全局限速、CPU/内存保护、共享文件系统延迟自适应暂停
 - 支持暂停、恢复、取消、断点续扫和单目录重算
+- 分片扫描：`scan --shard i/n` 只扫一部分一级目录，多客户端并行后 `merge` 合并
+- `fs-usage` 用 statfs 查询整个挂载点的总容量、已用和可用
 - `status` 显示活动任务实时已运行时间；进程被杀后 90 秒自动恢复为中断状态，不会一直显示“扫描中”
 - 失败目录保留上次有效数据；半成品不覆盖正式缓存
 - 单个静态二进制，支持 systemd、JSON、ETA 和慢目录耗时展示
@@ -53,6 +55,7 @@ dirspace top 20               # 查询只读 SQLite
 dirspace children --path /mnt/cae365  # 查看一级目录下的多级明细
 dirspace size --path /mnt/cae365      # 查一个目录的缓存大小（未命中可加 --exact）
 dirspace partial              # 扫描中查看本轮已完成目录，未完成的沿用上次（合并视图）
+dirspace fs-usage --path /mnt # 文件系统总容量/已用/可用（不是目录大小）
 dirspace status               # 进度、ETA、已完成目录合计、数据库
 ```
 
@@ -149,6 +152,42 @@ scan:
 - `index_depth` 只影响内存、数据库大小和可查询深度，不改变扫描范围
 - `index_all_dirs: true` 会保存每个目录的聚合大小，`size` 可以查询任意深层路径；目录多时数据库会变大，按需开启
 - `dirspace size --path <目录>` 只读缓存；`--exact` 在缓存未命中时把该目录作为独立根做一次精确扫描，不会重建整个上级根
+
+### 分片扫描与合并
+
+当一个根很大，单客户端扫不完时，可以按一级目录分片，在多台客户端上并行：
+
+```bash
+# 客户端 1
+dirspace --db /var/lib/dirspace/shard-0.db scan --path /mnt --shard 0/4
+
+# 客户端 2
+dirspace --db /var/lib/dirspace/shard-1.db scan --path /mnt --shard 1/4
+
+# 其余分片同理
+```
+
+每台客户端只扫自己的一级目录，结果写本地库。全部完成后，在一台机器上合并：
+
+```bash
+dirspace --db /var/lib/dirspace/merged.db --path /mnt \
+  merge --inputs /var/lib/dirspace/shard-0.db,/var/lib/dirspace/shard-1.db,/var/lib/dirspace/shard-2.db,/var/lib/dirspace/shard-3.db
+```
+
+合并后：
+
+```bash
+dirspace --db /var/lib/dirspace/merged.db size --path /mnt
+dirspace --db /var/lib/dirspace/merged.db children --path /mnt
+```
+
+注意：
+
+- 分片根路径必须一致，分片之间不能重叠
+- 分片结果是 `partial`，合并前不要当完整根使用
+- 当前合并按分片求和，**跨分片硬链接尚未去重**；存在跨分片硬链接时不能宣称精确
+- 多客户端总 QPS 需要人工控制，建议每台客户端把 `max_metadata_qps` 设为总预算 / 分片数
+- 单个扁平目录仍然不能拆，分片只能拆一级/子树目录
 
 如果某个一级目录特别大，可以设置：
 
@@ -305,6 +344,8 @@ sudo systemctl daemon-reload
 | `dirspace list` | 全部可见一级目录（完整名称） |
 | `dirspace children --path /mnt/a` | 查看目录索引中 a 的直接子目录（受 index_depth/top_k 限制） |
 | `dirspace size --path /mnt/a` | 查询目录的缓存大小；`--exact` 未命中时精扫该目录 |
+| `dirspace fs-usage --path /mnt` | 文件系统总容量/已用/可用，不是目录大小 |
+| `dirspace merge --inputs a.db,b.db` | 合并分片数据库 |
 | `dirspace partial` | 扫描中查看合并视图：本轮已完成目录 + 上次未完成目录，标注来源和合计 |
 | `dirspace partial --staging-only` | 只看本轮 staging，不合并上次结果 |
 | `dirspace status` | 缓存、当前任务、已完成目录合计、预计剩余、隐藏 stale 行、数据库 |

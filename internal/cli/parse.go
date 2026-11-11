@@ -20,6 +20,8 @@ type options struct {
 	resume      bool
 	stagingOnly bool
 	exact       bool
+	shard       string
+	inputs      []string
 	once        bool
 	vacuum      bool
 	repair      bool
@@ -55,6 +57,18 @@ func parseArgs(args []string) (*options, error) {
 			opts.stagingOnly = true
 		case arg == "--exact":
 			opts.exact = true
+		case arg == "--shard":
+			if i+1 >= len(args) {
+				return nil, &usageError{fmt.Sprintf("%s 需要一个参数", arg)}
+			}
+			i++
+			opts.shard = args[i]
+		case arg == "--inputs":
+			if i+1 >= len(args) {
+				return nil, &usageError{fmt.Sprintf("%s 需要一个参数", arg)}
+			}
+			i++
+			opts.inputs = append(opts.inputs, splitInputs(args[i])...)
 		case arg == "--once":
 			opts.once = true
 		case arg == "--vacuum":
@@ -84,6 +98,10 @@ func parseArgs(args []string) (*options, error) {
 			opts.logLevel = strings.TrimPrefix(arg, "--log-level=")
 		case strings.HasPrefix(arg, "--output="):
 			opts.output = strings.TrimPrefix(arg, "--output=")
+		case strings.HasPrefix(arg, "--shard="):
+			opts.shard = strings.TrimPrefix(arg, "--shard=")
+		case strings.HasPrefix(arg, "--inputs="):
+			opts.inputs = append(opts.inputs, splitInputs(strings.TrimPrefix(arg, "--inputs="))...)
 		case strings.HasPrefix(arg, "--days="):
 			value := strings.TrimPrefix(arg, "--days=")
 			days, err := strconv.Atoi(value)
@@ -112,6 +130,10 @@ func assignOption(opts *options, name, value string) error {
 		opts.logLevel = value
 	case "--output":
 		opts.output = value
+	case "--shard":
+		opts.shard = value
+	case "--inputs":
+		opts.inputs = append(opts.inputs, splitInputs(value)...)
 	case "--days":
 		days, err := strconv.Atoi(value)
 		if err != nil || days < 1 {
@@ -130,4 +152,34 @@ func parsePositiveInt(value, what string) (int, error) {
 		return 0, &usageError{fmt.Sprintf("%s 需要正整数，收到 %q", what, value)}
 	}
 	return n, nil
+}
+
+func parseShard(value string) (index, count int, err error) {
+	parts := strings.Split(value, "/")
+	if len(parts) != 2 {
+		return 0, 0, &usageError{"--shard 需要 INDEX/COUNT，例如 1/4"}
+	}
+	index, err = strconv.Atoi(parts[0])
+	if err != nil || index < 0 {
+		return 0, 0, &usageError{"--shard 的 INDEX 必须是非负整数"}
+	}
+	count, err = strconv.Atoi(parts[1])
+	if err != nil || count < 1 || count > 64 {
+		return 0, 0, &usageError{"--shard 的 COUNT 必须在 1 到 64 之间"}
+	}
+	if index >= count {
+		return 0, 0, &usageError{"--shard 的 INDEX 必须小于 COUNT"}
+	}
+	return index, count, nil
+}
+
+func splitInputs(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

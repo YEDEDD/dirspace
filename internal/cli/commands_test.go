@@ -216,3 +216,72 @@ func TestConfigExplainWorksWithoutDatabase(t *testing.T) {
 		t.Fatalf("config explain opened the database: %v", err)
 	}
 }
+
+func TestCLIShardAndMerge(t *testing.T) {
+	root, _ := cliFixture(t)
+	base := filepath.Dir(root)
+	shard0 := filepath.Join(base, "db", "shard0.db")
+	shard1 := filepath.Join(base, "db", "shard1.db")
+	merged := filepath.Join(base, "db", "merged.db")
+
+	for _, tc := range []struct {
+		db    string
+		shard string
+	}{{shard0, "0/2"}, {shard1, "1/2"}} {
+		code, stdout, stderr := runCLI(t, "--db", tc.db, "scan", "--path", root, "--shard", tc.shard)
+		if code != 0 {
+			t.Fatalf("shard %s exit=%d stdout=%s stderr=%s", tc.shard, code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "分片") {
+			t.Fatalf("shard %s missing note: %s", tc.shard, stdout)
+		}
+	}
+
+	code, stdout, stderr := runCLI(t, "--db", merged, "--path", root,
+		"merge", "--inputs", shard0+","+shard1)
+	if code != 0 {
+		t.Fatalf("merge exit=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "合并完成") {
+		t.Fatalf("merge output: %s", stdout)
+	}
+
+	code, stdout, stderr = runCLI(t, "--db", merged, "--path", root, "children", "--json")
+	if code != 0 {
+		t.Fatalf("merged children exit=%d stderr=%s", code, stderr)
+	}
+	var output map[string]any
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("children json: %v", err)
+	}
+	children, ok := output["children"].([]any)
+	if !ok || len(children) != 2 {
+		t.Fatalf("merged children=%v", output["children"])
+	}
+	code, stdout, _ = runCLI(t, "--db", merged, "--path", root, "size", "--json")
+	if code != 0 {
+		t.Fatalf("merged size exit=%d stdout=%s", code, stdout)
+	}
+	output = nil
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("size json: %v", err)
+	}
+	if output["size_bytes"].(float64) <= 0 {
+		t.Fatalf("merged size=%v", output)
+	}
+}
+
+func TestCLIFSUsage(t *testing.T) {
+	root, db := cliFixture(t)
+	code, stdout, stderr := runCLI(t, "--db", db, "--path", root, "fs-usage", "--json")
+	if code != 0 {
+		t.Fatalf("fs-usage exit=%d stderr=%s", code, stderr)
+	}
+	var output map[string]any
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("json: %v\n%s", err, stdout)
+	}
+	if output["total_bytes"].(float64) <= 0 {
+		t.Fatalf("fs usage=%v", output)
+	}
+}

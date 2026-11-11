@@ -48,6 +48,8 @@ type Request struct {
 	Resume         bool
 	ResumeCanceled bool
 	Progress       func(model.Progress)
+	ShardIndex     int
+	ShardCount     int
 }
 
 type topEntry struct {
@@ -209,6 +211,16 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	if req.Mode == "" {
 		req.Mode = model.ModeFull
 	}
+	if req.ShardCount <= 1 {
+		req.ShardCount = 1
+		req.ShardIndex = 0
+	}
+	if req.ShardIndex < 0 || req.ShardIndex >= req.ShardCount || req.ShardCount > 64 {
+		return nil, fmt.Errorf("无效分片 %d/%d（分片数 1..64）", req.ShardIndex, req.ShardCount)
+	}
+	if req.ShardCount > 1 && req.Mode != model.ModeFull {
+		return nil, errors.New("分片只支持精确全量扫描")
+	}
 	basis := model.BasisAllocated
 	if strings.EqualFold(s.cfg.Scan.SizeBasis, "logical") {
 		basis = model.BasisLogical
@@ -302,6 +314,15 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		entries = filtered
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
+	if req.ShardCount > 1 {
+		all := entries
+		entries = entries[:0]
+		for i, entry := range all {
+			if i%req.ShardCount == req.ShardIndex {
+				entries = append(entries, entry)
+			}
+		}
+	}
 
 	completed := map[string]model.DirOutcome{}
 	if run.Resumed {
@@ -388,7 +409,8 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	// Files and the directory block directly under the scan root belong to the
 	// root aggregate, not to any first-level child. They are captured before
 	// workers start so hard-link attribution is deterministic.
-	if req.TargetDir == "" && req.Mode != model.ModeIncremental {
+	if req.TargetDir == "" && req.Mode != model.ModeIncremental &&
+		(req.ShardCount <= 1 || req.ShardIndex == 0) {
 		selfOut, selfErr := s.scanRootSelf(scanCtx, sess)
 		if selfErr != nil {
 			summary := s.finishAbort(run, req, control, selfErr)
@@ -551,6 +573,14 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	if err != nil {
 		summary := s.finishAbort(run, req, control, fmt.Errorf("提交统计结果失败: %w", err))
 		return summary, canceled(control, err)
+	}
+	summary.ShardIndex = req.ShardIndex
+	summary.ShardCount = req.ShardCount
+	if req.ShardCount > 1 {
+		if statusErr := s.store.MarkRootPartial(ctx, run.RootID); statusErr != nil {
+			s.log.Warn("标记分片根状态失败", "error", statusErr.Error())
+		}
+		summary.DataStatus = model.DataPartial
 	}
 	if req.TargetDir != "" {
 		if targetErr := s.applyRebuildSummary(ctx, summary, run.RootID, req.TargetDir); targetErr != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/YEDEDD/dirspace/internal/mountinfo"
 	"github.com/YEDEDD/dirspace/internal/scanner"
 	"github.com/YEDEDD/dirspace/internal/storage"
+	"golang.org/x/sys/unix"
 )
 
 // ErrNoActiveScan is returned by pause/resume/cancel when no scan is running.
@@ -56,6 +57,8 @@ type ScanOptions struct {
 	Resume         bool
 	ResumeCanceled bool
 	Progress       func(model.Progress)
+	ShardIndex     int
+	ShardCount     int
 }
 
 // Scan runs a full or refresh scan for an exact scan root.
@@ -109,6 +112,8 @@ func (s *Service) Scan(ctx context.Context, path string, opts ScanOptions) (*mod
 		Resume:         resume,
 		ResumeCanceled: opts.ResumeCanceled,
 		Progress:       opts.Progress,
+		ShardIndex:     opts.ShardIndex,
+		ShardCount:     opts.ShardCount,
 	})
 	_ = s.Store.Checkpoint(context.WithoutCancel(ctx))
 	return summary, err
@@ -293,6 +298,67 @@ func (s *Service) Children(ctx context.Context, path string, limit int) (*IndexC
 	return &IndexChildrenView{
 		Path: requested, ScanRoot: root.Path, Parent: parent,
 		Dirs: dirs, SizeBasis: s.sizeBasis(),
+	}, nil
+}
+
+// Merge combines disjoint shard databases for one root into targetDB.
+func (s *Service) Merge(ctx context.Context, targetDB, rootPath string, inputs []string) (*model.Root, error) {
+	rootPath, err := config.NormalizeAbsolutePath(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExistingDir(rootPath); err != nil {
+		return nil, err
+	}
+	if targetDB == "" {
+		return nil, errors.New("merge 需要 --db <合并后的数据库>")
+	}
+	if len(inputs) == 0 {
+		return nil, errors.New("merge 需要 --inputs <分片1,分片2,...>")
+	}
+	absTarget, err := filepath.Abs(targetDB)
+	if err != nil {
+		return nil, err
+	}
+	if config.PathWithin(rootPath, absTarget) {
+		return nil, fmt.Errorf("合并数据库不能位于扫描根目录内: %s", absTarget)
+	}
+	return storage.MergeShards(ctx, absTarget, rootPath, inputs)
+}
+
+// FSUsage is the capacity of the filesystem containing Path.
+type FSUsage struct {
+	Path      string
+	FSType    string
+	Total     uint64
+	Free      uint64
+	Available uint64
+	Used      uint64
+	BlockSize int64
+}
+
+// FSUsage reads statfs for the filesystem containing path. It is a
+// filesystem-level number; it cannot answer per-directory usage.
+func (s *Service) FSUsage(ctx context.Context, path string) (*FSUsage, error) {
+	target, err := config.NormalizeAbsolutePath(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExistingDir(target); err != nil {
+		return nil, err
+	}
+	var stat unix.Statfs_t
+	if err := unix.Statfs(target, &stat); err != nil {
+		return nil, fmt.Errorf("读取文件系统容量失败 %s: %w", target, err)
+	}
+	blockSize := int64(stat.Bsize)
+	total := uint64(stat.Blocks) * uint64(stat.Bsize)
+	free := uint64(stat.Bfree) * uint64(stat.Bsize)
+	avail := uint64(stat.Bavail) * uint64(stat.Bsize)
+	return &FSUsage{
+		Path: target, FSType: mountinfo.FSType(target),
+		Total: total, Free: free, Available: avail,
+		Used: total - free, BlockSize: blockSize,
 	}, nil
 }
 
