@@ -17,6 +17,7 @@ import (
 
 type monitorReport struct {
 	Path       string         `json:"path"`
+	ActivePath string         `json:"active_path,omitempty"`
 	Unit       string         `json:"unit"`
 	PID        int            `json:"pid"`
 	Config     monitorConfig  `json:"config"`
@@ -87,10 +88,6 @@ func monitorCommand(ctx context.Context, cfg *config.Config, path string, status
 	if report.PID == 0 {
 		report.PID = findDaemonPID()
 	}
-	if report.PID > 0 {
-		report.Runtime.ProcessRSS, report.Runtime.ProcessThreads = readProcStatus(report.PID)
-		report.Runtime.ProcessCPUPercent = readProcessCPU(report.PID)
-	}
 	if v, ok := props["MemoryCurrent"]; ok {
 		report.Runtime.MemoryCurrent = parseUintBytes(v)
 	}
@@ -109,6 +106,7 @@ func monitorCommand(ctx context.Context, cfg *config.Config, path string, status
 	report.Runtime.HostCPUPercent, report.Runtime.HostLoad1, report.Runtime.HostMemUsed, report.Runtime.HostMemTotal = readHostResources()
 	if status != nil {
 		if status.Active != nil {
+			report.ActivePath = status.Root.Path
 			report.Runtime.Active = true
 			report.Runtime.Mode = string(status.Active.Mode)
 			report.Runtime.CurrentDir = status.Active.CurrentDir
@@ -117,6 +115,17 @@ func monitorCommand(ctx context.Context, cfg *config.Config, path string, status
 			report.Runtime.QPS = status.Active.MetadataQPS
 			report.Runtime.QPSLimit = status.Active.MetadataLimit
 			report.Runtime.LastError = status.Active.Error
+		} else if len(status.ChildActive) > 0 {
+			child := status.ChildActive[0]
+			report.ActivePath = child.RootPath
+			report.Runtime.Active = true
+			report.Runtime.Mode = string(child.Run.Mode)
+			report.Runtime.CurrentDir = child.Run.CurrentDir
+			report.Runtime.DoneDirs = child.DoneDirs
+			report.Runtime.TotalDirs = child.Run.TotalDirs
+			report.Runtime.QPS = child.Run.MetadataQPS
+			report.Runtime.QPSLimit = child.Run.MetadataLimit
+			report.Runtime.LastError = child.Run.Error
 		} else {
 			report.Runtime.QPS = status.MetadataQPS
 			report.Runtime.QPSLimit = status.MetadataLimit
@@ -127,6 +136,15 @@ func monitorCommand(ctx context.Context, cfg *config.Config, path string, status
 	}
 	if report.Runtime.QPSLimit == 0 {
 		report.Runtime.QPSLimit = float64(cfg.Performance.MaxMetadataQPS)
+	}
+	if report.Runtime.Active {
+		if scanPID := findScanPID(report.ActivePath); scanPID > 0 {
+			report.PID = scanPID
+		}
+	}
+	if report.PID > 0 {
+		report.Runtime.ProcessRSS, report.Runtime.ProcessThreads = readProcStatus(report.PID)
+		report.Runtime.ProcessCPUPercent = readProcessCPU(report.PID)
 	}
 	report.Assessment = assessMonitor(report)
 	return report
@@ -182,6 +200,40 @@ func findDaemonPID() int {
 		if strings.Contains(joined, "dirspace") && strings.Contains(joined, "daemon") {
 			return pid
 		}
+	}
+	return 0
+}
+
+func findScanPID(scanRoot string) int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 {
+			continue
+		}
+		cmdline, err := os.ReadFile("/proc/" + entry.Name() + "/cmdline")
+		if err != nil {
+			continue
+		}
+		joined := strings.ReplaceAll(string(cmdline), "\x00", " ")
+		if !strings.Contains(joined, "dirspace") || strings.Contains(joined, "daemon") ||
+			strings.Contains(joined, "monitor") || strings.Contains(joined, "status") {
+			continue
+		}
+		if !strings.Contains(joined, " quick ") && !strings.Contains(joined, " scan ") &&
+			!strings.Contains(joined, " refresh ") && !strings.Contains(joined, " rebuild ") {
+			continue
+		}
+		if scanRoot != "" && !strings.Contains(joined, scanRoot) {
+			continue
+		}
+		return pid
 	}
 	return 0
 }
@@ -394,7 +446,11 @@ func assessMonitor(r monitorReport) monitorVerdict {
 
 func printMonitor(w io.Writer, r monitorReport) {
 	fmt.Fprintf(w, "dirspace 资源与配置体检\n\n")
-	fmt.Fprintf(w, "路径：%s\n服务：%s\nPID：%d\n\n", r.Path, r.Unit, r.PID)
+	fmt.Fprintf(w, "路径：%s\n", r.Path)
+	if r.ActivePath != "" && r.ActivePath != r.Path {
+		fmt.Fprintf(w, "活跃任务根：%s\n", r.ActivePath)
+	}
+	fmt.Fprintf(w, "服务：%s\nPID：%d\n\n", r.Unit, r.PID)
 	fmt.Fprintln(w, "配置")
 	fmt.Fprintf(w, "  并发：%s\n", r.Config.Concurrency)
 	fmt.Fprintf(w, "  QPS：%d（自适应启动值更低）\n", r.Config.MaxMetadataQPS)

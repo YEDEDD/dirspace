@@ -602,6 +602,12 @@ func partialBytes(d model.DirStat, basis model.SizeBasis) int64 {
 }
 
 // StatusView is the read-only state summary shown by "status".
+type ChildActive struct {
+	RootPath string
+	Run      *model.Run
+	DoneDirs int
+}
+
 type StatusView struct {
 	Path              string
 	Root              model.Root
@@ -623,6 +629,7 @@ type StatusView struct {
 	MetadataOps       int64
 	MetadataQPS       float64
 	MetadataLimit     float64
+	ChildActive       []ChildActive
 }
 
 // Status reads only local database and mount table state.
@@ -687,6 +694,18 @@ func (s *Service) Status(ctx context.Context, path string) (*StatusView, error) 
 		view.MetadataLimit = float64(s.Cfg.Performance.MaxMetadataQPS)
 	}
 	view.Control, _ = s.Store.GetControl(ctx, root.ID)
+	if activeRuns, activeErr := s.Store.ActiveRuns(ctx); activeErr == nil {
+		for _, run := range activeRuns {
+			if run.RootID == root.ID || !config.PathWithin(requested, run.RootPath) {
+				continue
+			}
+			view.ChildActive = append(view.ChildActive, ChildActive{
+				RootPath: run.RootPath,
+				Run:      run,
+				DoneDirs: run.ProcessedDirs,
+			})
+		}
+	}
 	view.DirCount, _ = s.Store.CountDirs(ctx, root.ID)
 	view.StaleDirs, _ = s.Store.CountStaleDirs(ctx, root.ID)
 	view.DBSize = databaseSize(s.Store.Path())

@@ -44,40 +44,52 @@ func controlText(state model.ControlState) string {
 	}
 }
 
+type childActiveJSON struct {
+	RootPath   string  `json:"root_path"`
+	RunID      int64   `json:"run_id"`
+	Mode       string  `json:"mode"`
+	CurrentDir string  `json:"current_dir,omitempty"`
+	DoneDirs   int     `json:"done_directories"`
+	TotalDirs  int     `json:"total_directories"`
+	QPS        float64 `json:"metadata_qps"`
+	QPSLimit   float64 `json:"metadata_qps_limit"`
+}
+
 type statusJSON struct {
-	Path              string     `json:"path"`
-	HasBaseline       bool       `json:"has_baseline"`
-	ScanRoot          string     `json:"scan_root"`
-	DataStatus        string     `json:"data_status"`
-	DataStatusText    string     `json:"data_status_text"`
-	Accuracy          string     `json:"accuracy"`
-	AccuracyText      string     `json:"accuracy_text"`
-	ScannedAt         *time.Time `json:"last_success_at"`
-	LastAttemptAt     *time.Time `json:"last_attempt_at"`
-	DurationSeconds   float64    `json:"duration_seconds"`
-	SizeBasis         string     `json:"size_basis"`
-	TotalBytes        int64      `json:"total_bytes"`
-	TotalText         string     `json:"total_text"`
-	TotalAllocBytes   int64      `json:"total_alloc_bytes"`
-	TotalLogicalBytes int64      `json:"total_logical_bytes"`
-	FileCount         int64      `json:"file_count"`
-	DirCount          int64      `json:"dir_count"`
-	Server            string     `json:"server,omitempty"`
-	FSType            string     `json:"fstype,omitempty"`
-	DirRows           int        `json:"cached_directories"`
-	DBPath            string     `json:"database_path"`
-	DBSize            int64      `json:"database_size_bytes"`
-	ActiveRun         *runJSON   `json:"active_run,omitempty"`
-	ActiveDoneBytes   int64      `json:"active_done_bytes,omitempty"`
-	ActiveDoneDirs    int        `json:"active_done_directories,omitempty"`
-	LastRun           *runJSON   `json:"last_run,omitempty"`
-	Control           string     `json:"control_state"`
-	ControlText       string     `json:"control_state_text"`
-	Target            string     `json:"target_directory,omitempty"`
-	LastError         string     `json:"last_error,omitempty"`
-	MetadataOps       int64      `json:"metadata_ops"`
-	MetadataQPS       float64    `json:"metadata_qps"`
-	MetadataQPSLimit  float64    `json:"metadata_qps_limit"`
+	Path              string            `json:"path"`
+	HasBaseline       bool              `json:"has_baseline"`
+	ScanRoot          string            `json:"scan_root"`
+	DataStatus        string            `json:"data_status"`
+	DataStatusText    string            `json:"data_status_text"`
+	Accuracy          string            `json:"accuracy"`
+	AccuracyText      string            `json:"accuracy_text"`
+	ScannedAt         *time.Time        `json:"last_success_at"`
+	LastAttemptAt     *time.Time        `json:"last_attempt_at"`
+	DurationSeconds   float64           `json:"duration_seconds"`
+	SizeBasis         string            `json:"size_basis"`
+	TotalBytes        int64             `json:"total_bytes"`
+	TotalText         string            `json:"total_text"`
+	TotalAllocBytes   int64             `json:"total_alloc_bytes"`
+	TotalLogicalBytes int64             `json:"total_logical_bytes"`
+	FileCount         int64             `json:"file_count"`
+	DirCount          int64             `json:"dir_count"`
+	Server            string            `json:"server,omitempty"`
+	FSType            string            `json:"fstype,omitempty"`
+	DirRows           int               `json:"cached_directories"`
+	ChildActive       []childActiveJSON `json:"child_active,omitempty"`
+	DBPath            string            `json:"database_path"`
+	DBSize            int64             `json:"database_size_bytes"`
+	ActiveRun         *runJSON          `json:"active_run,omitempty"`
+	ActiveDoneBytes   int64             `json:"active_done_bytes,omitempty"`
+	ActiveDoneDirs    int               `json:"active_done_directories,omitempty"`
+	LastRun           *runJSON          `json:"last_run,omitempty"`
+	Control           string            `json:"control_state"`
+	ControlText       string            `json:"control_state_text"`
+	Target            string            `json:"target_directory,omitempty"`
+	LastError         string            `json:"last_error,omitempty"`
+	MetadataOps       int64             `json:"metadata_ops"`
+	MetadataQPS       float64           `json:"metadata_qps"`
+	MetadataQPSLimit  float64           `json:"metadata_qps_limit"`
 }
 
 type runJSON struct {
@@ -255,6 +267,15 @@ func printStatus(w io.Writer, view *service.StatusView) {
 		fmt.Fprintf(w, "已删除/过期目录行：%d（已隐藏，按 stale_retention_days 清理）\n", view.StaleDirs)
 	}
 	fmt.Fprintf(w, "控制状态：%s\n", controlText(view.Control.State))
+	if len(view.ChildActive) > 0 {
+		fmt.Fprintln(w, "其他活跃任务：")
+		for _, child := range view.ChildActive {
+			fmt.Fprintf(w, "  - %s  #%d %s\n", child.RootPath, child.Run.ID, child.Run.Mode.Label())
+			fmt.Fprintf(w, "    %d/%d 目录，当前 %s，QPS %.0f / %.0f\n",
+				child.DoneDirs, child.Run.TotalDirs, validText(child.Run.CurrentDir),
+				child.Run.MetadataQPS, child.Run.MetadataLimit)
+		}
+	}
 	lastError := view.Root.LastError
 	if view.Target != nil {
 		lastError = view.Target.LastError

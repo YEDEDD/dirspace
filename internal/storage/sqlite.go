@@ -522,6 +522,30 @@ func (s *Store) ActiveRun(ctx context.Context, rootID int64) (*model.Run, error)
 	return run, err
 }
 
+// ActiveRuns returns all live runs, including runs for child roots that are
+// not the configured parent root. Heartbeats older than 90 seconds are ignored,
+// matching ActiveRun.
+func (s *Store) ActiveRuns(ctx context.Context) ([]*model.Run, error) {
+	cutoff := time.Now().UTC().Add(-90 * time.Second).UnixMilli()
+	rows, err := s.rdb.QueryContext(ctx, `SELECT `+runColumns+`
+		FROM scan_runs r JOIN roots ON roots.id=r.root_id
+		WHERE r.status IN ('running','paused') AND r.heartbeat_at >= ?
+		ORDER BY r.id DESC`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*model.Run
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
 // LastRunByMode returns the newest run of a specific mode for a root.
 func (s *Store) LastRunByMode(ctx context.Context, rootID int64, mode model.ScanMode) (*model.Run, error) {
 	run, err := scanRun(s.rdb.QueryRowContext(ctx, `SELECT `+runColumns+`

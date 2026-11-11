@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/YEDEDD/dirspace/internal/model"
+	"github.com/YEDEDD/dirspace/internal/storage"
 )
 
 func cliFixture(t *testing.T) (root, db string) {
@@ -319,5 +322,44 @@ func TestAssessMonitorFlagsLowAndHigh(t *testing.T) {
 	})
 	if high.Level != "high" {
 		t.Fatalf("expected high, got %+v", high)
+	}
+}
+
+func TestStatusShowsActiveChildRootTask(t *testing.T) {
+	root, db := cliFixture(t)
+	if code, _, stderr := runCLI(t, "--db", db, "--path", root, "scan"); code != 0 {
+		t.Fatalf("seed scan exit=%d stderr=%s", code, stderr)
+	}
+	child := filepath.Join(root, "child")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	store, err := storage.Open(ctx, db, storage.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.StartRun(ctx, child, storage.StartOptions{Mode: model.ModeQuick, SizeBasis: model.BasisAllocated})
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = store.AbortRun(ctx, run.ID, model.RunInterrupted, "test")
+		store.Close()
+	}()
+	code, stdout, stderr := runCLI(t, "--db", db, "--path", root, "status")
+	if code != 0 {
+		t.Fatalf("status exit=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "其他活跃任务") || !strings.Contains(stdout, child) {
+		t.Fatalf("status did not report child task %s:\n%s", child, stdout)
+	}
+	code, stdout, stderr = runCLI(t, "--db", db, "--path", root, "monitor")
+	if code != 0 {
+		t.Fatalf("monitor exit=%d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stdout, "活跃任务根") || !strings.Contains(stdout, child) {
+		t.Fatalf("monitor did not pick child task %s:\n%s", child, stdout)
 	}
 }
