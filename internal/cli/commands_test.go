@@ -286,3 +286,38 @@ func TestCLIFSUsage(t *testing.T) {
 		t.Fatalf("fs usage=%v", output)
 	}
 }
+
+func TestCLIMonitor(t *testing.T) {
+	root, db := cliFixture(t)
+	code, stdout, stderr := runCLI(t, "--db", db, "--path", root, "monitor")
+	if code != 0 {
+		t.Fatalf("monitor exit=%d stderr=%s", code, stderr)
+	}
+	for _, want := range []string{"资源与配置体检", "配置", "运行", "判断", "结论"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("monitor output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestAssessMonitorFlagsLowAndHigh(t *testing.T) {
+	low := assessMonitor(monitorReport{
+		Config: monitorConfig{MaxCPUPercent: 20, MaxMetadataQPS: 300},
+		Runtime: monitorRuntime{
+			Active: true, ProcessCPUPercent: 19, QPS: 100, QPSLimit: 300,
+			HostCPUPercent: 20,
+		},
+	})
+	if low.Level != "low" {
+		t.Fatalf("expected low, got %+v", low)
+	}
+	high := assessMonitor(monitorReport{
+		Config: monitorConfig{MaxHostCPUPercent: 85, MaxMetadataQPS: 300},
+		Runtime: monitorRuntime{
+			Active: true, HostCPUPercent: 95, QPS: 100, QPSLimit: 300,
+		},
+	})
+	if high.Level != "high" {
+		t.Fatalf("expected high, got %+v", high)
+	}
+}

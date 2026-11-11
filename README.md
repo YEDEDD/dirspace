@@ -18,6 +18,7 @@ GitHub: <https://github.com/YEDEDD/dirspace>
 - 支持暂停、恢复、取消、断点续扫和单目录重算
 - 分片扫描：`scan --shard i/n` 只扫一部分一级目录，多客户端并行后 `merge` 合并
 - `fs-usage` 用 statfs 查询整个挂载点的总容量、已用和可用
+- `monitor` 一屏显示进程/主机资源、生效配置和高低判断
 - `status` 显示活动任务实时已运行时间；进程被杀后 90 秒自动恢复为中断状态，不会一直显示“扫描中”
 - 失败目录保留上次有效数据；半成品不覆盖正式缓存
 - 单个静态二进制，支持 systemd、JSON、ETA 和慢目录耗时展示
@@ -57,6 +58,7 @@ dirspace size --path /mnt/cae365      # 查一个目录的缓存大小（未命�
 dirspace partial              # 扫描中查看本轮已完成目录，未完成的沿用上次（合并视图）
 dirspace fs-usage --path /mnt # 文件系统总容量/已用/可用（不是目录大小）
 dirspace status               # 进度、ETA、已完成目录合计、数据库
+dirspace monitor              # 进程/主机资源 + 当前配置 + 配高/配低判断
 ```
 
 `quick` 和 `scan` 都可以加 `--path /真实挂载点`。不写时使用 `scan.root_path`。
@@ -377,6 +379,7 @@ sudo systemctl daemon-reload
 | `dirspace rebuild <目录>` | 只重算一个一级目录 |
 | `dirspace pause/resume/cancel` | 控制当前扫描 |
 | `dirspace daemon` | 常驻调度：快速 + 精确 |
+| `dirspace monitor` | 一屏资源、配置和高低判断 |
 | `dirspace quick --foreground` | 前台运行，不自动转后台 |
 | `dirspace quick --background` | 脚本中强制后台运行 |
 | `dirspace cleanup` | 清理历史、stale 行，可选 VACUUM |

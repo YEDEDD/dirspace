@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.8.1"
+var Version = "1.9.0"
 
 const (
 	exitOK      = 0
@@ -54,7 +54,7 @@ func parseCommand(positional []string) (command, error) {
 			return command{}, err
 		}
 		return command{name: name, args: rest}, nil
-	case "children", "list", "partial", "status", "size", "fs-usage", "merge", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
+	case "children", "list", "partial", "status", "size", "fs-usage", "merge", "monitor", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
 		"cleanup", "backup", "doctor":
 		if len(rest) > 0 {
 			return command{}, &usageError{fmt.Sprintf("%s 不接受位置参数: %s", name, strings.Join(rest, " "))}
@@ -91,7 +91,7 @@ func validateCommandOptions(cmd command, opts *options) error {
 	allowFull := cmd.name == "refresh" || cmd.name == "scan"
 	allowNew := cmd.name == "scan"
 	allowResume := cmd.name == "scan"
-	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "children" || cmd.name == "partial" || cmd.name == "status" || cmd.name == "size" || cmd.name == "fs-usage" || cmd.name == "merge" ||
+	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "children" || cmd.name == "partial" || cmd.name == "status" || cmd.name == "size" || cmd.name == "fs-usage" || cmd.name == "merge" || cmd.name == "monitor" ||
 		cmd.name == "scan" || cmd.name == "quick" || cmd.name == "refresh" || cmd.name == "rebuild" ||
 		cmd.name == "pause" || cmd.name == "resume" || cmd.name == "cancel"
 	if opts.once && !allowOnce {
@@ -280,6 +280,25 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 	defer store.Close()
 	svc := service.New(store, cfg, log)
 	switch cmd.name {
+	case "monitor":
+		status, statusErr := svc.Status(ctx, queryPath)
+		if statusErr != nil {
+			if _, ok := statusErr.(*service.NotScannedError); !ok {
+				printError(stderr, statusErr)
+				return exitRuntime
+			}
+		}
+		report := monitorCommand(ctx, cfg, queryPath, status)
+		if opts.json {
+			if err := writeJSON(stdout, report); err != nil {
+				fmt.Fprintf(stderr, "输出 JSON 失败: %v\n", err)
+				return exitRuntime
+			}
+		} else {
+			printMonitor(stdout, report)
+		}
+		return exitOK
+
 	case "top", "list":
 		limit := 0
 		if cmd.name == "top" {
@@ -781,6 +800,7 @@ func printHelp(w io.Writer) {
   merge               合并多个分片数据库（--db 目标库，--inputs 分片列表）
   partial             显示本轮已完成目录，未完成的沿用上次结果（--staging-only 只看本轮）
   status              显示缓存、任务、进度和数据库状态
+  monitor             一屏查看进程/主机资源、生效配置和高低判断
   config explain      显示最终生效的配置和推导值
   scan                执行一次精确全量扫描（默认）
   quick               执行一次快速抽样估算（有误差，标记为 sampled）
@@ -827,6 +847,7 @@ func printHelp(w io.Writer) {
   dirspace children --path /data/cache-a
   dirspace size --path /data/cache-a
   dirspace size --path /data/cache-a --exact
+  dirspace monitor --path /mnt
   dirspace fs-usage --path /data
   dirspace merge --path /data --db /var/lib/dirspace/merged.db --inputs shard-0.db,shard-1.db
   dirspace partial --path /mnt
