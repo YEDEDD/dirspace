@@ -18,6 +18,7 @@ type rollupCollector struct {
 	rootPath string
 	depth    int
 	topK     int
+	all      bool
 	accuracy model.Accuracy
 	status   model.DataStatus
 
@@ -31,14 +32,15 @@ type rollupNode struct {
 	truncated bool
 }
 
-func newRollupCollector(rootPath string, depth, topK int, accuracy model.Accuracy) *rollupCollector {
-	if depth <= 0 || topK <= 0 {
+func newRollupCollector(rootPath string, depth, topK int, accuracy model.Accuracy, all bool) *rollupCollector {
+	if !all && (depth <= 0 || topK <= 0) {
 		return nil
 	}
 	return &rollupCollector{
 		rootPath: rootPath,
 		depth:    depth,
 		topK:     topK,
+		all:      all,
 		accuracy: accuracy,
 		status:   model.DataFresh,
 		nodes:    make(map[string]*rollupNode),
@@ -76,7 +78,7 @@ func (c *rollupCollector) addDirect(abs string, agg treeAggregate, truncated boo
 	defer c.mu.Unlock()
 	for p := path; p != ""; p = parentIndexPath(p) {
 		level := strings.Count(p, "/") + 1
-		if level > c.depth {
+		if !c.all && level > c.depth {
 			continue
 		}
 		n := c.nodeLocked(p)
@@ -94,7 +96,7 @@ func (c *rollupCollector) recordSubtree(abs string, agg treeAggregate) {
 		return
 	}
 	path, depth, ok := c.relPath(abs)
-	if !ok || depth > c.depth {
+	if !ok || (!c.all && depth > c.depth) {
 		return
 	}
 	c.mu.Lock()
@@ -141,6 +143,37 @@ func (c *rollupCollector) rows(now time.Time) []model.DirIndexEntry {
 			}
 			return a.path < b.path
 		})
+	}
+
+	if c.all {
+		result := make([]model.DirIndexEntry, 0, len(c.nodes))
+		for path, n := range c.nodes {
+			if n == nil {
+				continue
+			}
+			parent := parentIndexPath(path)
+			name := path
+			if i := strings.LastIndexByte(path, '/'); i >= 0 {
+				name = path[i+1:]
+			}
+			result = append(result, model.DirIndexEntry{
+				Path:         path,
+				ParentPath:   parent,
+				Name:         name,
+				Depth:        strings.Count(path, "/") + 1,
+				AllocBytes:   n.agg.allocBytes,
+				LogicalBytes: n.agg.logicalBytes,
+				FileCount:    n.agg.fileCount,
+				DirCount:     n.agg.dirCount,
+				SymlinkCount: n.agg.symlinkCount,
+				DataStatus:   c.status,
+				Accuracy:     c.accuracy,
+				Truncated:    n.truncated,
+				UpdatedAt:    now,
+			})
+		}
+		sort.Slice(result, func(i, j int) bool { return result[i].Path < result[j].Path })
+		return result
 	}
 
 	selected := make(map[string]bool)

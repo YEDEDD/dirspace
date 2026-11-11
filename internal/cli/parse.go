@@ -19,6 +19,7 @@ type options struct {
 	newOnly     bool
 	resume      bool
 	stagingOnly bool
+	exact       bool
 	once        bool
 	vacuum      bool
 	repair      bool
@@ -52,6 +53,8 @@ func parseArgs(args []string) (*options, error) {
 			opts.resume = true
 		case arg == "--staging-only":
 			opts.stagingOnly = true
+		case arg == "--exact":
+			opts.exact = true
 		case arg == "--once":
 			opts.once = true
 		case arg == "--vacuum":

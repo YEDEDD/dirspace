@@ -521,6 +521,80 @@ func printPartial(w io.Writer, view *service.PartialView) {
 	}
 }
 
+type sizeJSON struct {
+	Path          string     `json:"path"`
+	ScanRoot      string     `json:"scan_root"`
+	SizeBytes     int64      `json:"size_bytes"`
+	SizeText      string     `json:"size_text"`
+	AllocBytes    int64      `json:"alloc_bytes"`
+	LogicalBytes  int64      `json:"logical_bytes"`
+	FileCount     int64      `json:"file_count"`
+	DirCount      int64      `json:"dir_count"`
+	Basis         string     `json:"size_basis"`
+	Source        string     `json:"source"`
+	DataStatus    string     `json:"data_status"`
+	Accuracy      string     `json:"accuracy"`
+	LastSuccessAt *time.Time `json:"last_success_at,omitempty"`
+	UpdatedAt     time.Time  `json:"updated_at,omitempty"`
+	ExactScan     bool       `json:"exact_scan"`
+}
+
+func buildSizeJSON(view *service.SizeView) sizeJSON {
+	out := sizeJSON{
+		Path: view.Path, ScanRoot: view.Root.Path, Basis: basisValue(view.SizeBasis),
+		Source: "root", ExactScan: view.Scanned,
+	}
+	if view.Entry != nil {
+		e := view.Entry
+		out.Source = "index"
+		out.AllocBytes, out.LogicalBytes = e.AllocBytes, e.LogicalBytes
+		out.FileCount, out.DirCount = e.FileCount, e.DirCount
+		out.DataStatus, out.Accuracy = string(e.DataStatus), string(e.Accuracy)
+		out.UpdatedAt = e.UpdatedAt
+		last := e.UpdatedAt
+		out.LastSuccessAt = &last
+	} else {
+		r := view.Root
+		out.AllocBytes, out.LogicalBytes = r.TotalAlloc, r.TotalLogical
+		out.FileCount, out.DirCount = r.FileCount, r.DirCount
+		out.DataStatus, out.Accuracy = string(r.Status), string(r.Accuracy)
+		out.LastSuccessAt, out.UpdatedAt = r.LastSuccessAt, r.UpdatedAt
+	}
+	if view.SizeBasis == model.BasisLogical {
+		out.SizeBytes = out.LogicalBytes
+	} else {
+		out.SizeBytes = out.AllocBytes
+	}
+	out.SizeText = formatSize(out.SizeBytes)
+	return out
+}
+
+func printSize(w io.Writer, view *service.SizeView) {
+	out := buildSizeJSON(view)
+	fmt.Fprintln(w, "目录大小")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "目录：%s\n", validText(out.Path))
+	fmt.Fprintf(w, "扫描根：%s\n", validText(out.ScanRoot))
+	fmt.Fprintf(w, "空间：%s\n", out.SizeText)
+	fmt.Fprintf(w, "文件数：%s\n", formatCount(out.FileCount))
+	fmt.Fprintf(w, "子目录数：%s\n", formatCount(out.DirCount))
+	fmt.Fprintf(w, "准确性：%s\n", out.Accuracy)
+	fmt.Fprintf(w, "数据状态：%s\n", out.DataStatus)
+	if out.LastSuccessAt != nil {
+		fmt.Fprintf(w, "数据时间：%s\n", formatTimestamp(out.LastSuccessAt))
+	} else {
+		fmt.Fprintln(w, "数据时间：—")
+	}
+	source := "扫描根汇总"
+	if out.Source == "index" {
+		source = "目录索引"
+	}
+	if out.ExactScan {
+		source = "本次精确扫描"
+	}
+	fmt.Fprintf(w, "来源：%s\n", source)
+}
+
 type childJSON struct {
 	Rank         int    `json:"rank"`
 	Path         string `json:"path"`

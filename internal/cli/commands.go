@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.6.0"
+var Version = "1.7.0"
 
 const (
 	exitOK      = 0
@@ -54,7 +54,7 @@ func parseCommand(positional []string) (command, error) {
 			return command{}, err
 		}
 		return command{name: name, args: rest}, nil
-	case "children", "list", "partial", "status", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
+	case "children", "list", "partial", "status", "size", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
 		"cleanup", "backup", "doctor":
 		if len(rest) > 0 {
 			return command{}, &usageError{fmt.Sprintf("%s 不接受位置参数: %s", name, strings.Join(rest, " "))}
@@ -91,7 +91,7 @@ func validateCommandOptions(cmd command, opts *options) error {
 	allowFull := cmd.name == "refresh" || cmd.name == "scan"
 	allowNew := cmd.name == "scan"
 	allowResume := cmd.name == "scan"
-	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "children" || cmd.name == "partial" || cmd.name == "status" ||
+	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "children" || cmd.name == "partial" || cmd.name == "status" || cmd.name == "size" ||
 		cmd.name == "scan" || cmd.name == "quick" || cmd.name == "refresh" || cmd.name == "rebuild" ||
 		cmd.name == "pause" || cmd.name == "resume" || cmd.name == "cancel"
 	if opts.once && !allowOnce {
@@ -123,6 +123,9 @@ func validateCommandOptions(cmd command, opts *options) error {
 	}
 	if opts.stagingOnly && cmd.name != "partial" {
 		return &usageError{"--staging-only 仅用于 partial"}
+	}
+	if opts.exact && cmd.name != "size" {
+		return &usageError{"--exact 仅用于 size"}
 	}
 	if opts.path != "" && !allowPath {
 		return &usageError{"--path 仅用于查询、扫描或任务控制命令；daemon 多根请配置 extra_roots"}
@@ -288,6 +291,22 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 			}
 		} else {
 			printChildren(stdout, view)
+		}
+		return exitOK
+
+	case "size":
+		view, err := svc.Size(ctx, queryPath, opts.exact)
+		if err != nil {
+			printError(stderr, err)
+			return exitRuntime
+		}
+		if opts.json {
+			if err := writeJSON(stdout, buildSizeJSON(view)); err != nil {
+				fmt.Fprintf(stderr, "输出 JSON 失败: %v\n", err)
+				return exitRuntime
+			}
+		} else {
+			printSize(stdout, view)
 		}
 		return exitOK
 
@@ -563,6 +582,9 @@ func buildConfigJSON(cfg *config.Config) map[string]any {
 		"interval":             formatInterval(cfg.Scan.Interval.Duration),
 		"quick_interval":       formatInterval(cfg.Scan.QuickInterval.Duration),
 		"quick_sample_percent": cfg.Scan.QuickSamplePercent,
+		"index_depth":          cfg.Scan.IndexDepth,
+		"index_top_k":          cfg.Scan.IndexTopK,
+		"index_all_dirs":       cfg.Scan.IndexAllDirs,
 		"retention_days":       cfg.Database.RetentionDays,
 		"stale_retention_days": cfg.Database.StaleRetentionDays,
 		"concurrency":          cfg.Performance.Concurrency.String(),
@@ -587,6 +609,13 @@ func buildConfigJSON(cfg *config.Config) map[string]any {
 	}
 }
 
+func onOff(value bool) string {
+	if value {
+		return "开"
+	}
+	return "关"
+}
+
 func printConfig(w io.Writer, cfg *config.Config) {
 	source := cfg.Source
 	if source == "" {
@@ -599,8 +628,8 @@ func printConfig(w io.Writer, cfg *config.Config) {
 	fmt.Fprintf(w, "精确全量间隔：%s；快速估算间隔：%s（抽样 %d%%）\n",
 		formatInterval(cfg.Scan.Interval.Duration), formatInterval(cfg.Scan.QuickInterval.Duration),
 		cfg.Scan.QuickSamplePercent)
-	fmt.Fprintf(w, "目录索引：深度 %d，每层 top %d（0 表示关闭）\n",
-		cfg.Scan.IndexDepth, cfg.Scan.IndexTopK)
+	fmt.Fprintf(w, "目录索引：深度 %d，每层 top %d（0 表示关闭）；全目录索引：%s\n",
+		cfg.Scan.IndexDepth, cfg.Scan.IndexTopK, onOff(cfg.Scan.IndexAllDirs))
 	if cfg.Scan.QuickMaxFilesPerTop > 0 {
 		fmt.Fprintf(w, "quick 单目录文件上限：%d（超出标记 partial）\n", cfg.Scan.QuickMaxFilesPerTop)
 	} else {
@@ -666,6 +695,7 @@ func printHelp(w io.Writer) {
   top <N>             显示空间排名前 N 个一级目录（默认 10）
   list                显示全部一级目录
   children            显示目录索引中某个目录的直接子目录（--path 指定）
+  size                查询一个目录的已缓存大小；--exact 未命中时精扫该目录
   partial             显示本轮已完成目录，未完成的沿用上次结果（--staging-only 只看本轮）
   status              显示缓存、任务、进度和数据库状态
   config explain      显示最终生效的配置和推导值
@@ -693,6 +723,7 @@ func printHelp(w io.Writer) {
   --new                   只扫描新增或失效的一级目录（scan，需要已有基线）
   --resume                断点续扫（scan）
   --staging-only          只显示本轮 staging，不与上次结果合并（partial）
+  --exact                 未命中缓存时精确扫描目标目录作为独立根（size）
   --once                  只运行一轮（daemon）
   --days <N>              清理早于 N 天的历史（cleanup）
   --vacuum                清理后 VACUUM（cleanup）
@@ -707,6 +738,8 @@ func printHelp(w io.Writer) {
   dirspace top 20
   dirspace list --json
   dirspace children --path /data/cache-a
+  dirspace size --path /data/cache-a
+  dirspace size --path /data/cache-a --exact
   dirspace partial --path /mnt
   dirspace partial --path /mnt --staging-only
   dirspace --path /data top 10

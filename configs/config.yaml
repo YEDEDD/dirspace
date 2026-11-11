@@ -22,6 +22,9 @@ scan:
   # 需要看四级、五级时改成 4 或 5；更深的未命中路径需要重扫。
   index_depth: 3
   index_top_k: 20
+  # 全目录索引：为每个目录保存一行聚合大小（1.3M 目录约几百 MB）。
+  # 开启后 size 命令可查询任意深层目录；默认关闭以控制数据库大小。
+  index_all_dirs: false
   # quick 单个一级目录最多统计的文件数；0 表示不限制。
   # 超出后该目录标记 partial，空间显示为下限，避免一个超大目录拖死整轮。
   quick_max_files_per_top: 0

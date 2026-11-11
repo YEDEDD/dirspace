@@ -296,6 +296,74 @@ func (s *Service) Children(ctx context.Context, path string, limit int) (*IndexC
 	}, nil
 }
 
+// SizeView is one cached directory size. Entry is nil when Path is the scan
+// root and the value comes from the root aggregate.
+type SizeView struct {
+	Path      string
+	Root      model.Root
+	Entry     *model.DirIndexEntry
+	SizeBasis model.SizeBasis
+	Scanned   bool
+}
+
+// Size returns a cached directory aggregate. When exact is true and the path is
+// not in the cache, it scans that path as its own root and returns the fresh
+// root aggregate.
+func (s *Service) Size(ctx context.Context, path string, exact bool) (*SizeView, error) {
+	requested, err := config.NormalizeAbsolutePath(path)
+	if err != nil {
+		return nil, err
+	}
+	root, rootErr := s.findScannedRoot(ctx, requested)
+	if rootErr == nil {
+		rel, relErr := filepath.Rel(root.Path, requested)
+		if relErr != nil {
+			return nil, relErr
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "." {
+			rel = ""
+		}
+		if rel != "" && !strings.HasPrefix(rel, "../") {
+			entry, entryErr := s.Store.GetIndexEntry(ctx, root.ID, rel)
+			if entryErr == nil {
+				return &SizeView{Path: requested, Root: *root, Entry: entry, SizeBasis: s.sizeBasis()}, nil
+			}
+			if !errors.Is(entryErr, storage.ErrNotFound) {
+				return nil, entryErr
+			}
+			if !exact {
+				return nil, fmt.Errorf("目录 %s 尚未进入索引；可使用 dirspace size --path %s --exact 单独扫描该目录，或开启 scan.index_all_dirs 并重新扫描所属根", requested, requested)
+			}
+		} else if rel == "" {
+			return &SizeView{Path: requested, Root: *root, SizeBasis: s.sizeBasis()}, nil
+		}
+	} else if rootErr != nil {
+		var notScanned *NotScannedError
+		if !errors.As(rootErr, &notScanned) {
+			return nil, rootErr
+		}
+	}
+	if !exact {
+		if rootErr != nil {
+			return nil, rootErr
+		}
+		return nil, &NotScannedError{Path: requested}
+	}
+
+	// Scan the requested subtree as its own root. This is the on-demand exact
+	// path: it does not need the parent root to be idle, because the lock is
+	// scoped to this path.
+	if _, err := s.Scan(ctx, requested, ScanOptions{Mode: model.ModeFull}); err != nil {
+		return nil, err
+	}
+	root, err = s.Store.GetRoot(ctx, requested)
+	if err != nil {
+		return nil, err
+	}
+	return &SizeView{Path: requested, Root: *root, SizeBasis: s.sizeBasis(), Scanned: true}, nil
+}
+
 func (s *Service) findScannedRoot(ctx context.Context, path string) (*model.Root, error) {
 	cur := path
 	for {

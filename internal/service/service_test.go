@@ -556,3 +556,52 @@ func TestPartialMergesCurrentWithLastPublished(t *testing.T) {
 		}
 	}
 }
+
+func TestSizeReadsAllDirectoryIndex(t *testing.T) {
+	f := newServiceFixture(t)
+	f.cfg.Scan.IndexAllDirs = true
+	f.cfg.Scan.IndexDepth = 0
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a", "b", "c", "deep.bin"), 4096)
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	deep := filepath.Join(root, "alpha", "a", "b", "c")
+	view, err := f.svc.Size(context.Background(), deep, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Entry == nil || view.Entry.Path != "alpha/a/b/c" || view.Entry.AllocBytes == 0 {
+		t.Fatalf("all-dir size entry: %+v", view.Entry)
+	}
+	if view.Scanned {
+		t.Fatal("cached size should not rescan")
+	}
+
+	rootView, err := f.svc.Size(context.Background(), root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootView.Entry != nil || rootView.Root.TotalAlloc == 0 {
+		t.Fatalf("root size: %+v", rootView)
+	}
+}
+
+func TestSizeExactScansUnindexedSubtree(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	target := filepath.Join(root, "alpha")
+	mkFile(t, filepath.Join(target, "a", "data.bin"), 4096)
+
+	view, err := f.svc.Size(context.Background(), target, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Scanned || view.Root.Path != target || view.Root.TotalAlloc == 0 {
+		t.Fatalf("exact size: %+v", view)
+	}
+	if _, err := f.store.GetRoot(context.Background(), target); err != nil {
+		t.Fatalf("exact size should register target root: %v", err)
+	}
+}

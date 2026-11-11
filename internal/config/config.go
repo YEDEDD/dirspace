@@ -327,6 +327,10 @@ type ScanConfig struct {
 	IndexDepth int `yaml:"index_depth"`
 	// IndexTopK is the maximum number of children retained per indexed parent.
 	IndexTopK int `yaml:"index_top_k"`
+	// IndexAllDirs stores every directory in the drill-down index instead of
+	// only the top IndexTopK children up to IndexDepth. This makes arbitrary
+	// nested paths queryable at the cost of a larger local database.
+	IndexAllDirs bool `yaml:"index_all_dirs"`
 	// QuickMaxFilesPerTop caps one quick-mode top-level directory. Zero means
 	// unlimited. A capped directory is marked partial and reports a lower bound.
 	QuickMaxFilesPerTop int64 `yaml:"quick_max_files_per_top"`
@@ -433,6 +437,7 @@ func DefaultForProfile(name string) *Config {
 			QuickSamplePercent:  2,
 			IndexDepth:          3,
 			IndexTopK:           20,
+			IndexAllDirs:        false,
 			QuickMaxFilesPerTop: 0,
 			ScanOnStart:         true,
 			StartupDelay:        Duration{15 * time.Second},

@@ -371,13 +371,14 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		quickSalt:          uint64(run.ID),
 		quickMaxFiles:      s.cfg.Scan.QuickMaxFilesPerTop,
 	}
-	if req.TargetDir == "" && req.Mode != model.ModeIncremental && s.cfg.Scan.IndexDepth > 0 {
+	if req.TargetDir == "" && req.Mode != model.ModeIncremental &&
+		(s.cfg.Scan.IndexDepth > 0 || s.cfg.Scan.IndexAllDirs) {
 		accuracy := model.AccuracyExact
 		if req.Mode == model.ModeQuick {
 			accuracy = model.AccuracySampled
 		}
 		sess.rollups = newRollupCollector(rootPath, s.cfg.Scan.IndexDepth,
-			s.cfg.Scan.IndexTopK, accuracy)
+			s.cfg.Scan.IndexTopK, accuracy, s.cfg.Scan.IndexAllDirs)
 	}
 
 	heartbeatCtx, stopHeartbeat := context.WithCancel(scanCtx)

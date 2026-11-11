@@ -51,6 +51,7 @@ dirspace quick                # 先跑快速估算，几分钟到几小时出近
 dirspace scan                 # 再跑精确全量，建立准确基线
 dirspace top 20               # 查询只读 SQLite
 dirspace children --path /mnt/cae365  # 查看一级目录下的多级明细
+dirspace size --path /mnt/cae365      # 查一个目录的缓存大小（未命中可加 --exact）
 dirspace partial              # 扫描中查看本轮已完成目录，未完成的沿用上次（合并视图）
 dirspace status               # 进度、ETA、已完成目录合计、数据库
 ```
@@ -124,6 +125,7 @@ scan:
   quick_sample_percent: 2
   index_depth: 3
   index_top_k: 20
+  index_all_dirs: false   # true 时保存每个目录的聚合大小
   quick_max_files_per_top: 0  # 0 不限制；>0 时超大目录最多扫这么多文件
   require_mount_point: true
 ```
@@ -145,6 +147,8 @@ scan:
 - quick 和 exact 都会建立索引；quick 的结果标记为 `sampled`
 - 索引不会增加 NFS 读取次数；扫描本来就会遍历这些目录
 - `index_depth` 只影响内存、数据库大小和可查询深度，不改变扫描范围
+- `index_all_dirs: true` 会保存每个目录的聚合大小，`size` 可以查询任意深层路径；目录多时数据库会变大，按需开启
+- `dirspace size --path <目录>` 只读缓存；`--exact` 在缓存未命中时把该目录作为独立根做一次精确扫描，不会重建整个上级根
 
 如果某个一级目录特别大，可以设置：
 
@@ -300,6 +304,7 @@ sudo systemctl daemon-reload
 | `dirspace` / `dirspace top 20` | 一级目录空间排名，显示数据时间、状态、耗时 |
 | `dirspace list` | 全部可见一级目录（完整名称） |
 | `dirspace children --path /mnt/a` | 查看目录索引中 a 的直接子目录（受 index_depth/top_k 限制） |
+| `dirspace size --path /mnt/a` | 查询目录的缓存大小；`--exact` 未命中时精扫该目录 |
 | `dirspace partial` | 扫描中查看合并视图：本轮已完成目录 + 上次未完成目录，标注来源和合计 |
 | `dirspace partial --staging-only` | 只看本轮 staging，不合并上次结果 |
 | `dirspace status` | 缓存、当前任务、已完成目录合计、预计剩余、隐藏 stale 行、数据库 |

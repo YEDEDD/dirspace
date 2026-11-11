@@ -93,6 +93,22 @@ func TestCLIEndToEnd(t *testing.T) {
 		t.Fatalf("children=%v", output["children"])
 	}
 
+	code, stdout, stderr = runCLI(t, "--db", db, "--path", root, "size", "--json")
+	if code != 0 {
+		t.Fatalf("size exit=%d stderr=%s", code, stderr)
+	}
+	output = nil
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("size json: %v\n%s", err, stdout)
+	}
+	if output["size_bytes"] == nil || output["source"] != "root" {
+		t.Fatalf("size output=%v", output)
+	}
+	code, stdout, _ = runCLI(t, "--db", db, "--path", filepath.Join(root, "alpha"), "size")
+	if code != 0 || !strings.Contains(stdout, "目录大小") {
+		t.Fatalf("child size: exit=%d stdout=%s", code, stdout)
+	}
+
 	code, stdout, _ = runCLI(t, "--db", db, "--path", root, "status", "--json")
 	if code != 0 {
 		t.Fatalf("status exit=%d", code)
@@ -159,6 +175,10 @@ func TestCLIUsageErrors(t *testing.T) {
 	code, _, _ = runCLI(t, "--staging-only", "status")
 	if code != exitUsage {
 		t.Fatalf("staging-only on status exit=%d", code)
+	}
+	code, _, _ = runCLI(t, "--exact", "status")
+	if code != exitUsage {
+		t.Fatalf("exact on status exit=%d", code)
 	}
 }
 
