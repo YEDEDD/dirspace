@@ -149,6 +149,7 @@ func (s *Scanner) scanTree(ctx context.Context, sess *scanSession, topName, root
 				if !ok {
 					return
 				}
+				sess.counters.startWorker()
 				var taskAgg treeAggregate
 				var err error
 				if task.files != nil {
@@ -156,6 +157,7 @@ func (s *Scanner) scanTree(ctx context.Context, sess *scanSession, topName, root
 				} else {
 					taskAgg, err = s.processDirTask(ctx, sess, q, task)
 				}
+				sess.counters.finishWorker()
 				if err != nil {
 					fail(err)
 				} else {

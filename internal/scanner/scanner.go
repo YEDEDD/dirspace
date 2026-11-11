@@ -67,6 +67,7 @@ type progressCounters struct {
 	alloc   atomic.Int64
 	logical atomic.Int64
 	done    atomic.Int64
+	workers atomic.Int64
 
 	// current is the last name set, kept for backward compatibility with
 	// callers that only need a single value. active is the authoritative set
@@ -77,6 +78,9 @@ type progressCounters struct {
 	active   map[string]int
 	activeMu sync.Mutex
 }
+
+func (c *progressCounters) startWorker()  { c.workers.Add(1) }
+func (c *progressCounters) finishWorker() { c.workers.Add(-1) }
 
 func (c *progressCounters) startCurrent(name string) {
 	c.activeMu.Lock()
@@ -779,7 +783,7 @@ func (s *Scanner) heartbeatLoop(ctx context.Context, run *model.Run, req Request
 			lastAt = now
 			ok, err := s.store.Heartbeat(context.WithoutCancel(ctx), run.ID, counters.getCurrent(),
 				counters.done.Load(), counters.files.Load(), counters.alloc.Load(),
-				ops, qps, controller.Rate())
+				ops, qps, controller.Rate(), int(counters.workers.Load()))
 			if err != nil {
 				s.log.Warn("更新扫描心跳失败", "error", err.Error())
 			} else if !ok {
@@ -802,6 +806,7 @@ func (s *Scanner) heartbeatLoop(ctx context.Context, run *model.Run, req Request
 				Paused:     control.paused.Load(),
 				Elapsed:    time.Since(started),
 				QPS:        qps,
+				Workers:    int(counters.workers.Load()),
 			})
 		}
 	}

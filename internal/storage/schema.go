@@ -2,7 +2,7 @@ package storage
 
 // schemaVersion is bumped whenever an incompatible or additive migration is
 // required. The program refuses to open a database created by a newer version.
-const schemaVersion = 6
+const schemaVersion = 8
 
 var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS roots (
@@ -51,7 +51,9 @@ var schemaStatements = []string{
 		duration_ms INTEGER NOT NULL DEFAULT 0,
 		metadata_ops INTEGER NOT NULL DEFAULT 0,
 		metadata_qps REAL NOT NULL DEFAULT 0,
-		metadata_limit REAL NOT NULL DEFAULT 0
+		metadata_limit REAL NOT NULL DEFAULT 0,
+		initial_metadata_limit REAL NOT NULL DEFAULT 0,
+		active_workers INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_scan_runs_root_status ON scan_runs(root_id, status, id DESC)`,
 
@@ -179,6 +181,8 @@ var schemaColumns = []struct {
 	{"scan_runs", "metadata_ops", "INTEGER NOT NULL DEFAULT 0"},
 	{"scan_runs", "metadata_qps", "REAL NOT NULL DEFAULT 0"},
 	{"scan_runs", "metadata_limit", "REAL NOT NULL DEFAULT 0"},
+	{"scan_runs", "initial_metadata_limit", "REAL NOT NULL DEFAULT 0"},
+	{"scan_runs", "active_workers", "INTEGER NOT NULL DEFAULT 0"},
 	{"run_dirs", "truncated", "INTEGER NOT NULL DEFAULT 0"},
 	{"top_dirs", "truncated", "INTEGER NOT NULL DEFAULT 0"},
 }

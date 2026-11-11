@@ -27,6 +27,7 @@ type monitorReport struct {
 
 type monitorConfig struct {
 	Concurrency       string  `json:"concurrency"`
+	ConcurrencyMax    int     `json:"concurrency_max"`
 	MaxMetadataQPS    int     `json:"max_metadata_qps"`
 	MaxCPUPercent     int     `json:"max_cpu_percent"`
 	MemoryLimit       int64   `json:"memory_limit"`
@@ -55,6 +56,8 @@ type monitorRuntime struct {
 	CurrentDir        string  `json:"current_dir,omitempty"`
 	DoneDirs          int     `json:"done_dirs"`
 	TotalDirs         int     `json:"total_dirs"`
+	ActiveWorkers     int     `json:"active_workers"`
+	TaskStartQPS      float64 `json:"task_start_qps_limit"`
 	QPS               float64 `json:"qps"`
 	QPSLimit          float64 `json:"qps_limit"`
 	LastError         string  `json:"last_error,omitempty"`
@@ -73,6 +76,7 @@ func monitorCommand(ctx context.Context, cfg *config.Config, path string, status
 		Unit: monitorUnit(),
 		Config: monitorConfig{
 			Concurrency:       cfg.Performance.Concurrency.String(),
+			ConcurrencyMax:    cfg.Performance.Concurrency.Limit(),
 			MaxMetadataQPS:    cfg.Performance.MaxMetadataQPS,
 			MaxCPUPercent:     cfg.Performance.MaxCPUPercent,
 			MemoryLimit:       cfg.Performance.MemoryLimit.Resolve(),
@@ -112,6 +116,8 @@ func monitorCommand(ctx context.Context, cfg *config.Config, path string, status
 			report.Runtime.CurrentDir = status.Active.CurrentDir
 			report.Runtime.DoneDirs = status.ActiveDoneDirs
 			report.Runtime.TotalDirs = status.Active.TotalDirs
+			report.Runtime.ActiveWorkers = status.Active.ActiveWorkers
+			report.Runtime.TaskStartQPS = status.Active.InitialMetadataLimit
 			report.Runtime.QPS = status.Active.MetadataQPS
 			report.Runtime.QPSLimit = status.Active.MetadataLimit
 			report.Runtime.LastError = status.Active.Error
@@ -123,6 +129,8 @@ func monitorCommand(ctx context.Context, cfg *config.Config, path string, status
 			report.Runtime.CurrentDir = child.Run.CurrentDir
 			report.Runtime.DoneDirs = child.DoneDirs
 			report.Runtime.TotalDirs = child.Run.TotalDirs
+			report.Runtime.ActiveWorkers = child.Run.ActiveWorkers
+			report.Runtime.TaskStartQPS = child.Run.InitialMetadataLimit
 			report.Runtime.QPS = child.Run.MetadataQPS
 			report.Runtime.QPSLimit = child.Run.MetadataLimit
 			report.Runtime.LastError = child.Run.Error
@@ -387,13 +395,26 @@ func assessMonitor(r monitorReport) monitorVerdict {
 	}
 	cfg := r.Config
 	rt := r.Runtime
-	staleLimit := cfg.MaxMetadataQPS > 0 && rt.QPSLimit > 0 && int(rt.QPSLimit) != cfg.MaxMetadataQPS
-	if staleLimit {
+	staleLimit := cfg.MaxMetadataQPS > 0 && (rt.TaskStartQPS == 0 || int(rt.TaskStartQPS) != cfg.MaxMetadataQPS)
+	if rt.TaskStartQPS == 0 {
+		v.Reasons = append(v.Reasons, "当前任务由旧版本启动，未记录启动限速；不按旧任务限速判断配置高低")
+	} else if staleLimit {
 		v.Reasons = append(v.Reasons, fmt.Sprintf(
 			"当前任务启动时限速 %.0f，配置现在是 %d；新配置只对下一个任务生效",
-			rt.QPSLimit, cfg.MaxMetadataQPS))
+			rt.TaskStartQPS, cfg.MaxMetadataQPS))
 	}
 	var high, low bool
+	workersAtCap := cfg.ConcurrencyMax > 0 && rt.ActiveWorkers >= cfg.ConcurrencyMax
+	if rt.ActiveWorkers > 0 && workersAtCap {
+		if rt.QPSLimit > 0 && rt.QPS < 0.8*rt.QPSLimit {
+			low = true
+			v.Reasons = append(v.Reasons, fmt.Sprintf("活跃 worker 已满 %d/%d，但 QPS 只有 %.0f/%.0f；并发或单个大目录可能是瓶颈", rt.ActiveWorkers, cfg.ConcurrencyMax, rt.QPS, rt.QPSLimit))
+		} else if rt.QPSLimit > 0 && rt.QPS >= 0.85*rt.QPSLimit {
+			v.Reasons = append(v.Reasons, fmt.Sprintf("活跃 worker %d/%d 和 QPS %.0f/%.0f 同时到顶，二者都是候选瓶颈", rt.ActiveWorkers, cfg.ConcurrencyMax, rt.QPS, rt.QPSLimit))
+		}
+	} else if rt.ActiveWorkers > 0 && rt.QPSLimit > 0 && rt.QPS >= 0.85*rt.QPSLimit {
+		v.Reasons = append(v.Reasons, fmt.Sprintf("QPS 已到 %.0f/%.0f，但活跃 worker 只有 %d/%d；QPS 是主要瓶颈", rt.QPS, rt.QPSLimit, rt.ActiveWorkers, cfg.ConcurrencyMax))
+	}
 
 	if cfg.MaxHostCPUPercent > 0 && rt.HostCPUPercent >= cfg.MaxHostCPUPercent {
 		high = true
@@ -516,10 +537,16 @@ func printMonitor(w io.Writer, r monitorReport) {
 		if r.Runtime.CurrentDir != "" {
 			fmt.Fprintf(w, "，当前 %s", r.Runtime.CurrentDir)
 		}
+		fmt.Fprintf(w, "，活跃 worker %d", r.Runtime.ActiveWorkers)
+		if r.Config.ConcurrencyMax > 0 {
+			fmt.Fprintf(w, " / 上限 %d", r.Config.ConcurrencyMax)
+		}
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  QPS：%.0f / 任务启动时限速 %.0f\n", r.Runtime.QPS, r.Runtime.QPSLimit)
-		if r.Config.MaxMetadataQPS > 0 && int(r.Runtime.QPSLimit) != r.Config.MaxMetadataQPS {
-			fmt.Fprintf(w, "  当前配置 QPS：%d（等待新任务生效）\n", r.Config.MaxMetadataQPS)
+		fmt.Fprintf(w, "  QPS：%.0f / 当前动态限速 %.0f\n", r.Runtime.QPS, r.Runtime.QPSLimit)
+		if r.Runtime.TaskStartQPS > 0 {
+			fmt.Fprintf(w, "  任务启动 QPS：%.0f；当前配置 QPS：%d\n", r.Runtime.TaskStartQPS, r.Config.MaxMetadataQPS)
+		} else {
+			fmt.Fprintf(w, "  任务启动 QPS：未记录；当前配置 QPS：%d\n", r.Config.MaxMetadataQPS)
 		}
 	} else {
 		fmt.Fprintf(w, "  任务：空闲（最近 QPS %.0f / %.0f）\n", r.Runtime.QPS, r.Runtime.QPSLimit)

@@ -45,14 +45,15 @@ func controlText(state model.ControlState) string {
 }
 
 type childActiveJSON struct {
-	RootPath   string  `json:"root_path"`
-	RunID      int64   `json:"run_id"`
-	Mode       string  `json:"mode"`
-	CurrentDir string  `json:"current_dir,omitempty"`
-	DoneDirs   int     `json:"done_directories"`
-	TotalDirs  int     `json:"total_directories"`
-	QPS        float64 `json:"metadata_qps"`
-	QPSLimit   float64 `json:"metadata_qps_limit"`
+	RootPath      string  `json:"root_path"`
+	RunID         int64   `json:"run_id"`
+	Mode          string  `json:"mode"`
+	CurrentDir    string  `json:"current_dir,omitempty"`
+	DoneDirs      int     `json:"done_directories"`
+	TotalDirs     int     `json:"total_directories"`
+	ActiveWorkers int     `json:"active_workers"`
+	QPS           float64 `json:"metadata_qps"`
+	QPSLimit      float64 `json:"metadata_qps_limit"`
 }
 
 type statusJSON struct {
@@ -112,6 +113,8 @@ type runJSON struct {
 	MetadataOps      int64      `json:"metadata_ops"`
 	MetadataQPS      float64    `json:"metadata_qps"`
 	MetadataQPSLimit float64    `json:"metadata_qps_limit"`
+	InitialQPSLimit  float64    `json:"initial_metadata_qps_limit"`
+	ActiveWorkers    int        `json:"active_workers"`
 }
 
 func toRunJSON(run *model.Run) *runJSON {
@@ -142,6 +145,8 @@ func toRunJSON(run *model.Run) *runJSON {
 		MetadataOps:      run.MetadataOps,
 		MetadataQPS:      run.MetadataQPS,
 		MetadataQPSLimit: run.MetadataLimit,
+		InitialQPSLimit:  run.InitialMetadataLimit,
+		ActiveWorkers:    run.ActiveWorkers,
 	}
 }
 
@@ -271,9 +276,9 @@ func printStatus(w io.Writer, view *service.StatusView) {
 		fmt.Fprintln(w, "其他活跃任务：")
 		for _, child := range view.ChildActive {
 			fmt.Fprintf(w, "  - %s  #%d %s\n", child.RootPath, child.Run.ID, child.Run.Mode.Label())
-			fmt.Fprintf(w, "    %d/%d 目录，当前 %s，QPS %.0f / %.0f\n",
+			fmt.Fprintf(w, "    %d/%d 目录，当前 %s，活跃 worker %d，QPS %.0f / %.0f\n",
 				child.DoneDirs, child.Run.TotalDirs, validText(child.Run.CurrentDir),
-				child.Run.MetadataQPS, child.Run.MetadataLimit)
+				child.Run.ActiveWorkers, child.Run.MetadataQPS, child.Run.MetadataLimit)
 		}
 	}
 	lastError := view.Root.LastError

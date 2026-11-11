@@ -196,32 +196,34 @@ type DirIndexEntry struct {
 
 // Run describes a scan run and its progress.
 type Run struct {
-	ID            int64
-	RootID        int64
-	Mode          ScanMode
-	Status        RunStatus
-	StartedAt     time.Time
-	FinishedAt    *time.Time
-	HeartbeatAt   time.Time
-	TotalDirs     int
-	ProcessedDirs int
-	TotalFiles    int64
-	TotalBytes    int64
-	SelfAlloc     int64
-	SelfLogical   int64
-	SelfFiles     int64
-	SelfSymlinks  int64
-	SelfTransient int64
-	SelfCompleted bool
-	CurrentDir    string
-	Error         string
-	Resumed       bool
-	SizeBasis     SizeBasis
-	RootPath      string
-	Duration      time.Duration
-	MetadataOps   int64
-	MetadataQPS   float64
-	MetadataLimit float64
+	ID                   int64
+	RootID               int64
+	Mode                 ScanMode
+	Status               RunStatus
+	StartedAt            time.Time
+	FinishedAt           *time.Time
+	HeartbeatAt          time.Time
+	TotalDirs            int
+	ProcessedDirs        int
+	TotalFiles           int64
+	TotalBytes           int64
+	SelfAlloc            int64
+	SelfLogical          int64
+	SelfFiles            int64
+	SelfSymlinks         int64
+	SelfTransient        int64
+	SelfCompleted        bool
+	CurrentDir           string
+	Error                string
+	Resumed              bool
+	SizeBasis            SizeBasis
+	RootPath             string
+	Duration             time.Duration
+	MetadataOps          int64
+	MetadataQPS          float64
+	MetadataLimit        float64
+	InitialMetadataLimit float64
+	ActiveWorkers        int
 }
 
 // Control is the current control request for a root.
@@ -257,6 +259,7 @@ type Progress struct {
 	Paused     bool
 	Elapsed    time.Duration
 	QPS        float64
+	Workers    int
 }
 
 // ScanSummary is returned after a scan finishes or aborts.

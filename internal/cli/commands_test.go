@@ -368,7 +368,7 @@ func TestAssessMonitorStaleRunLimit(t *testing.T) {
 	v := assessMonitor(monitorReport{
 		Config: monitorConfig{MaxMetadataQPS: 2000, MaxCPUPercent: 40},
 		Runtime: monitorRuntime{
-			Active: true, QPS: 928, QPSLimit: 1000, ProcessCPUPercent: 24,
+			Active: true, QPS: 928, QPSLimit: 1000, TaskStartQPS: 1000, ProcessCPUPercent: 24,
 			HostCPUPercent: 18, HostLoad1: 4,
 		},
 	})

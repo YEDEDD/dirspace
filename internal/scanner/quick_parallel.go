@@ -90,7 +90,9 @@ func (s *Scanner) scanQuickTree(ctx context.Context, sess *scanSession, root str
 				if !ok {
 					return
 				}
+				sess.counters.startWorker()
 				taskAgg, err := s.processQuickDirTask(ctx, sess, q, task, budget)
+				sess.counters.finishWorker()
 				mu.Lock()
 				agg.add(taskAgg)
 				mu.Unlock()

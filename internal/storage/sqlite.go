@@ -358,7 +358,7 @@ const runColumns = `r.id, r.root_id, r.mode, r.status, r.started_at, r.finished_
 	r.heartbeat_at, r.total_dirs, r.processed_dirs, r.total_files, r.total_bytes,
 	r.self_alloc_bytes, r.self_logical_bytes, r.self_file_count, r.self_symlink_count,
 	r.self_transient_errors, r.self_completed, r.current_dir, r.error, r.resumed, r.size_basis, r.duration_ms,
-	r.metadata_ops, r.metadata_qps, r.metadata_limit, roots.path`
+	r.metadata_ops, r.metadata_qps, r.metadata_limit, r.initial_metadata_limit, r.active_workers, roots.path`
 
 func scanRun(row rowScanner) (*model.Run, error) {
 	var run model.Run
@@ -374,7 +374,7 @@ func scanRun(row rowScanner) (*model.Run, error) {
 		&run.SelfAlloc, &run.SelfLogical, &run.SelfFiles, &run.SelfSymlinks,
 		&run.SelfTransient, &selfCompleted,
 		&run.CurrentDir, &run.Error, &resumed, &basis, &duration,
-		&run.MetadataOps, &run.MetadataQPS, &run.MetadataLimit, &rootPath,
+		&run.MetadataOps, &run.MetadataQPS, &run.MetadataLimit, &run.InitialMetadataLimit, &run.ActiveWorkers, &rootPath,
 	)
 	if err != nil {
 		return nil, err
@@ -475,9 +475,9 @@ func (s *Store) StartRun(ctx context.Context, rootPath string, opts StartOptions
 			return err
 		}
 		res, err := tx.ExecContext(ctx, `INSERT INTO scan_runs
-			(root_id, mode, status, size_basis, started_at, heartbeat_at, metadata_limit)
-			VALUES(?, ?, 'running', ?, ?, ?, ?)`,
-			rootID, string(opts.Mode), string(opts.SizeBasis), now, now, opts.MetadataLimit)
+			(root_id, mode, status, size_basis, started_at, heartbeat_at, metadata_limit, initial_metadata_limit)
+			VALUES(?, ?, 'running', ?, ?, ?, ?, ?)`,
+			rootID, string(opts.Mode), string(opts.SizeBasis), now, now, opts.MetadataLimit, opts.MetadataLimit)
 		if err != nil {
 			return err
 		}
@@ -667,11 +667,11 @@ func (s *Store) SaveRootSelf(ctx context.Context, runID int64, out model.DirOutc
 
 // Heartbeat updates liveness and in-progress counters. It returns false when
 // the run is no longer active (for example it was marked interrupted).
-func (s *Store) Heartbeat(ctx context.Context, runID int64, currentDir string, processed, files, bytes, metadataOps int64, metadataQPS, metadataLimit float64) (bool, error) {
+func (s *Store) Heartbeat(ctx context.Context, runID int64, currentDir string, processed, files, bytes, metadataOps int64, metadataQPS, metadataLimit float64, activeWorkers int) (bool, error) {
 	res, err := s.wdb.ExecContext(ctx, `UPDATE scan_runs SET heartbeat_at=?, current_dir=?,
-		processed_dirs=?, total_files=?, total_bytes=?, metadata_ops=?, metadata_qps=?, metadata_limit=?
+		processed_dirs=?, total_files=?, total_bytes=?, metadata_ops=?, metadata_qps=?, metadata_limit=?, active_workers=?
 		WHERE id=? AND status IN ('running','paused')`,
-		nowMillis(), currentDir, processed, files, bytes, metadataOps, metadataQPS, metadataLimit, runID)
+		nowMillis(), currentDir, processed, files, bytes, metadataOps, metadataQPS, metadataLimit, activeWorkers, runID)
 	if err != nil {
 		return false, err
 	}
