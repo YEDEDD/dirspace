@@ -59,7 +59,15 @@ type ScanOptions struct {
 	Progress       func(model.Progress)
 	ShardIndex     int
 	ShardCount     int
+	// SkipIfScannedAfter makes a scheduled scan abort if another process
+	// published a successful scan after this time. It closes the race between
+	// the scheduler's re-read and the scan acquiring the filesystem lock.
+	SkipIfScannedAfter time.Time
 }
+
+// ErrScanSuperseded means another process completed a newer scan while this
+// scheduled run was waiting for the global lock.
+var ErrScanSuperseded = errors.New("已有更新的扫描结果，跳过本次调度")
 
 // Scan runs a full or refresh scan for an exact scan root.
 func (s *Service) Scan(ctx context.Context, path string, opts ScanOptions) (*model.ScanSummary, error) {
@@ -73,7 +81,7 @@ func (s *Service) Scan(ctx context.Context, path string, opts ScanOptions) (*mod
 	if config.PathWithin(rootPath, s.Store.Path()) {
 		return nil, fmt.Errorf("数据库不能位于扫描根目录内: %s 位于 %s", s.Store.Path(), rootPath)
 	}
-	lock, err := acquireRootLock(s.Store.Dir(), rootPath)
+	lock, err := acquireScanLock(rootPath)
 	if err != nil {
 		if errors.Is(err, ErrRootLocked) {
 			return nil, fmt.Errorf("%w: %s", ErrRootLocked, rootPath)
@@ -81,6 +89,12 @@ func (s *Service) Scan(ctx context.Context, path string, opts ScanOptions) (*mod
 		return nil, err
 	}
 	defer lock.Close()
+	if !opts.SkipIfScannedAfter.IsZero() {
+		if root, rootErr := s.Store.GetRoot(ctx, rootPath); rootErr == nil &&
+			root.LastSuccessAt != nil && root.LastSuccessAt.After(opts.SkipIfScannedAfter) {
+			return nil, ErrScanSuperseded
+		}
+	}
 
 	mode := opts.Mode
 	if mode == "" {
@@ -152,7 +166,7 @@ func (s *Service) Rebuild(ctx context.Context, path, name string) (*model.ScanSu
 	if config.PathWithin(rootPath, s.Store.Path()) {
 		return nil, fmt.Errorf("数据库不能位于扫描根目录内: %s 位于 %s", s.Store.Path(), rootPath)
 	}
-	lock, err := acquireRootLock(s.Store.Dir(), rootPath)
+	lock, err := acquireScanLock(rootPath)
 	if err != nil {
 		if errors.Is(err, ErrRootLocked) {
 			return nil, fmt.Errorf("%w: %s", ErrRootLocked, rootPath)

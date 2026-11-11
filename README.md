@@ -61,6 +61,24 @@ dirspace status               # 进度、ETA、已完成目录合计、数据库
 
 `quick` 和 `scan` 都可以加 `--path /真实挂载点`。不写时使用 `scan.root_path`。
 
+### 长任务自动转后台
+
+在终端里直接执行 `quick`、`scan`、`refresh`、`rebuild` 或 `size --exact` 时，如果 stdout 是终端，程序会自动拉起一个独立的后台进程后立即返回，不再占用终端：
+
+```bash
+dirspace quick --path /mnt
+# 已转入后台运行（PID ...）
+# 日志：/var/lib/dirspace/manual/quick-....log
+# 查看进度：dirspace status --path /mnt
+```
+
+- 关闭终端、SSH 断开不会中断后台任务
+- 需要前台等待结果时加 `--foreground`
+- 脚本/CI 可以加 `--background` 强制后台；stdout 不是终端时默认仍是前台
+- `--json` 不会自动转后台，避免结果丢失
+
+调度器每次唤醒都会重新读数据库计算下次任务，不会因为手动扫描完成后又重复跑一轮。扫描锁按文件系统共享，手动任务、daemon、不同 `--db` 的进程不会同时扫同一个文件系统或嵌套目录。
+
 ## 定时策略
 
 推荐直接使用常驻 daemon，它同时维护两套调度：
@@ -75,7 +93,9 @@ scan:
 - 快速估算先跑，先给用户一个近似视图
 - 精确全量按 `interval` 跑，覆盖近似值
 - 只有快速结果时，`accuracy=sampled`；只有精确结果时，`accuracy=exact`
-- 两套任务串行执行，不会同时扫描同一个根
+- 两套任务串行执行，不会同时扫描同一个根或同一个文件系统
+- 每次唤醒都从数据库重算计划；手动 CLI 扫描完成后，daemon 不会重复执行同一轮
+- 外部任务正在跑时，到期的任务会保持 due 并等待，不会错误顺延一整个周期
 - 每次完成后自动清理历史、已删除目录和过期数据
 
 如果只想每周跑一次精确任务，也可以使用 systemd timer，但不要再同时启用 `dirspace.service`：
@@ -357,6 +377,8 @@ sudo systemctl daemon-reload
 | `dirspace rebuild <目录>` | 只重算一个一级目录 |
 | `dirspace pause/resume/cancel` | 控制当前扫描 |
 | `dirspace daemon` | 常驻调度：快速 + 精确 |
+| `dirspace quick --foreground` | 前台运行，不自动转后台 |
+| `dirspace quick --background` | 脚本中强制后台运行 |
 | `dirspace cleanup` | 清理历史、stale 行，可选 VACUUM |
 | `dirspace backup` | 备份 SQLite |
 | `dirspace doctor` | 检查或修复数据库 |

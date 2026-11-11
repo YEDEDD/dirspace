@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -26,6 +27,7 @@ type serviceFixture struct {
 func newServiceFixture(t *testing.T) *serviceFixture {
 	t.Helper()
 	base := t.TempDir()
+	t.Setenv("DIRSPACE_LOCK_DIR", filepath.Join(base, "locks"))
 	cfg := config.Default()
 	cfg.Database.Path = filepath.Join(base, "db", "usage.db")
 	cfg.Scan.RootPath = filepath.Join(base, "root")
@@ -603,5 +605,121 @@ func TestSizeExactScansUnindexedSubtree(t *testing.T) {
 	}
 	if _, err := f.store.GetRoot(context.Background(), target); err != nil {
 		t.Fatalf("exact size should register target root: %v", err)
+	}
+}
+
+func TestReconcileDefersWhileExternalRunIsActive(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	if _, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeQuick, SizeBasis: model.BasisAllocated,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	due, active, _, err := f.svc.reconcileSchedule(context.Background(), []string{root}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !active {
+		t.Fatal("external active run was not detected")
+	}
+	if due != nil {
+		t.Fatalf("scheduler must defer while a run is active: %+v", due)
+	}
+}
+
+func TestScheduledScanSkipsWhenANewerScanCompleted(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{Mode: model.ModeFull}); err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now().Add(-time.Second)
+	_, err := f.svc.Scan(context.Background(), root, ScanOptions{
+		Mode:               model.ModeFull,
+		SkipIfScannedAfter: cutoff,
+	})
+	if !errors.Is(err, ErrScanSuperseded) {
+		t.Fatalf("expected superseded scan, got %v", err)
+	}
+}
+
+func TestFilesystemScanLockIsSharedAcrossDatabasePaths(t *testing.T) {
+	t.Setenv("DIRSPACE_LOCK_DIR", t.TempDir())
+	root := t.TempDir()
+	first, err := acquireScanLock(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := acquireScanLock(root); !errors.Is(err, ErrRootLocked) {
+		t.Fatalf("second lock should fail, got %v", err)
+	}
+}
+
+func TestReconcileDoesNotDuplicateManualQuick(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{Mode: model.ModeFull}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{Mode: model.ModeQuick}); err != nil {
+		t.Fatal(err)
+	}
+	due, active, _, err := f.svc.reconcileSchedule(context.Background(), []string{root}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active {
+		t.Fatal("no run should be active")
+	}
+	if due != nil {
+		t.Fatalf("manual quick must not be duplicated: %+v", due)
+	}
+}
+
+func TestInterruptedQuickDoesNotPushNextQuickForward(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{Mode: model.ModeFull}); err != nil {
+		t.Fatal(err)
+	}
+	quick, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeQuick, SizeBasis: model.BasisAllocated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AbortRun(context.Background(), quick.ID, model.RunInterrupted, "old quick"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", f.cfg.Database.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	oldFinish := time.Now().Add(-10 * time.Hour).UTC().UnixMilli()
+	if _, err := raw.ExecContext(context.Background(),
+		`UPDATE scan_runs SET finished_at=? WHERE id=?`, oldFinish, quick.ID); err != nil {
+		t.Fatal(err)
+	}
+	// A newer non-quick run must not make nextSchedule look at the old quick's
+	// finish time and silently move the next quick ten hours into the past.
+	other, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeRebuild, SizeBasis: model.BasisAllocated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AbortRun(context.Background(), other.ID, model.RunInterrupted, "newer rebuild"); err != nil {
+		t.Fatal(err)
+	}
+	sc := f.svc.nextSchedule(context.Background(), root)
+	if sc.quick.Before(time.Now().Add(5 * time.Hour)) {
+		t.Fatalf("interrupted quick pushed schedule backwards: %s", sc.quick)
 	}
 }

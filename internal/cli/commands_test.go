@@ -13,6 +13,7 @@ import (
 func cliFixture(t *testing.T) (root, db string) {
 	t.Helper()
 	base := t.TempDir()
+	t.Setenv("DIRSPACE_LOCK_DIR", filepath.Join(base, "locks"))
 	root = filepath.Join(base, "root")
 	db = filepath.Join(base, "db", "usage.db")
 	if err := os.MkdirAll(filepath.Join(root, "alpha"), 0o755); err != nil {

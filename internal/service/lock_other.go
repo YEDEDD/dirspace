@@ -2,17 +2,14 @@
 
 package service
 
-import (
-	"errors"
-	"os"
-)
+import "os"
 
-var ErrRootLocked = errors.New("该扫描根目录已有扫描任务在运行")
+var ErrRootLocked = os.ErrExist
 
 type rootLock struct{ file *os.File }
 
-func acquireRootLock(dbDir, scanRoot string) (*rootLock, error) {
-	return nil, errors.New("当前平台不支持扫描任务锁")
+func acquireScanLock(string) (*rootLock, error) {
+	return &rootLock{}, nil
 }
 
 func (l *rootLock) Close() error { return nil }

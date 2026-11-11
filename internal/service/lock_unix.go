@@ -10,22 +10,30 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/YEDEDD/dirspace/internal/platform"
 )
 
-// ErrRootLocked means another process is already scanning the same root.
-var ErrRootLocked = errors.New("该扫描根目录已有扫描任务在运行")
+// ErrRootLocked means another process is already scanning this filesystem.
+// The lock is filesystem-wide, not database-local, so two binaries using
+// different --db paths still cannot scan overlapping roots concurrently.
+var ErrRootLocked = errors.New("该文件系统已有扫描任务在运行")
 
 type rootLock struct {
 	file *os.File
 	path string
 }
 
-func acquireRootLock(dbDir, scanRoot string) (*rootLock, error) {
-	lockDir := filepath.Join(dbDir, "locks")
+func acquireScanLock(scanRoot string) (*rootLock, error) {
+	lockDir, err := scanLockDirectory()
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(lockDir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建锁目录失败: %w", err)
 	}
-	sum := sha256.Sum256([]byte(scanRoot))
+	key := scanLockKey(scanRoot)
+	sum := sha256.Sum256([]byte(key))
 	name := hex.EncodeToString(sum[:12]) + ".lock"
 	path := filepath.Join(lockDir, name)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
@@ -40,6 +48,25 @@ func acquireRootLock(dbDir, scanRoot string) (*rootLock, error) {
 		return nil, fmt.Errorf("锁定扫描任务失败: %w", err)
 	}
 	return &rootLock{file: f, path: path}, nil
+}
+
+func scanLockKey(scanRoot string) string {
+	if dev := platform.DeviceID(scanRoot); dev != 0 {
+		return fmt.Sprintf("fs-%d", dev)
+	}
+	return "root-" + scanRoot
+}
+
+func scanLockDirectory() (string, error) {
+	if dir := os.Getenv("DIRSPACE_LOCK_DIR"); dir != "" {
+		return dir, nil
+	}
+	for _, dir := range []string{"/run/dirspace/locks", filepath.Join(os.TempDir(), "dirspace-locks")} {
+		if err := os.MkdirAll(dir, 0o700); err == nil {
+			return dir, nil
+		}
+	}
+	return "", errors.New("无法创建 dirspace 锁目录")
 }
 
 func (l *rootLock) Close() error {

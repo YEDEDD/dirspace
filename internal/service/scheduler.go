@@ -24,6 +24,7 @@ func (s *Service) RunDaemon(ctx context.Context, opts DaemonOptions) error {
 	if len(roots) == 0 {
 		return errors.New("没有配置任何扫描根目录")
 	}
+	sort.Strings(roots)
 	s.Recover(ctx)
 	s.Log.Info("dirspace 后台调度启动", "roots", len(roots),
 		"exact_interval", s.Cfg.Scan.Interval.Duration.String(),
@@ -39,7 +40,7 @@ func (s *Service) RunDaemon(ctx context.Context, opts DaemonOptions) error {
 	if opts.Once {
 		var errs []error
 		for _, root := range roots {
-			if err := s.runScheduledRoot(ctx, root, model.ModeFull); err != nil {
+			if err := s.runScheduledRoot(ctx, root, model.ModeFull, time.Time{}); err != nil {
 				if errors.Is(err, context.Canceled) {
 					return nil
 				}
@@ -49,86 +50,176 @@ func (s *Service) RunDaemon(ctx context.Context, opts DaemonOptions) error {
 		return errors.Join(errs...)
 	}
 
-	next := make(map[string]scanSchedule, len(roots))
-	for _, root := range roots {
-		next[root] = s.nextSchedule(ctx, root)
-		s.Log.Info("已安排扫描", "root", root,
-			"next_exact", next[root].exact.Format(time.RFC3339),
-			"next_quick", next[root].quick.Format(time.RFC3339))
-	}
-
+	// Schedules are deliberately reconstructed from the database on every
+	// wake-up instead of being cached in memory. A manual CLI scan, or another
+	// daemon, can complete between two ticks; caching `next` would then run a
+	// duplicate scan. Reconcile first, then acquire the shared filesystem lock,
+	// then reconcile again after taking the lock.
+	retryAt := make(map[string]time.Time)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
+		s.Recover(ctx)
 		now := time.Now()
-		earliest := now.Add(24 * time.Hour)
-		var exactDue, quickDue []string
-		for _, root := range roots {
-			sc := next[root]
-			if !sc.quick.IsZero() && !sc.quick.After(now) {
-				quickDue = append(quickDue, root)
-			}
-			if !sc.exact.After(now) {
-				exactDue = append(exactDue, root)
-			}
-			for _, when := range []time.Time{sc.exact, sc.quick} {
-				if when.IsZero() {
-					continue
-				}
-				if when.Before(earliest) {
-					earliest = when
-				}
-			}
-		}
-		// Quick mode is cheap and gives users a fresh approximate view first.
-		// Exact scans still run immediately afterwards when they are due.
-		if len(quickDue) > 0 {
-			sort.Strings(quickDue)
-			for _, root := range quickDue {
-				if err := ctx.Err(); err != nil {
-					return nil
-				}
-				err := s.runScheduledRoot(ctx, root, model.ModeQuick)
-				if err != nil && !errors.Is(err, context.Canceled) {
-					s.Log.Error("快速估算失败", "root", root, "error", err.Error())
-				}
-				sc := next[root]
-				sc.quick = time.Now().Add(s.Cfg.Scan.QuickInterval.Duration)
-				next[root] = sc
-				s.Log.Info("下次快速估算已安排", "root", root, "next", sc.quick.Format(time.RFC3339))
+		due, active, earliest, err := s.reconcileSchedule(ctx, roots, now)
+		if err != nil {
+			s.Log.Warn("重新计算扫描计划失败", "error", err.Error())
+			if err := sleepContext(ctx, daemonPollInterval); err != nil {
+				return nil
 			}
 			continue
 		}
-		if len(exactDue) > 0 {
-			sort.Strings(exactDue)
-			for _, root := range exactDue {
-				if err := ctx.Err(); err != nil {
-					return nil
-				}
-				err := s.runScheduledRoot(ctx, root, model.ModeFull)
-				if err != nil && !errors.Is(err, context.Canceled) {
-					s.Log.Error("定时扫描失败", "root", root, "error", err.Error())
-				}
-				sc := next[root]
-				sc.exact = time.Now().Add(s.Cfg.Scan.Interval.Duration)
-				if s.Cfg.Scan.QuickInterval.Duration > 0 {
-					sc.quick = time.Now().Add(s.Cfg.Scan.QuickInterval.Duration)
-				}
-				next[root] = sc
-				s.Log.Info("下次扫描已安排", "root", root,
-					"next_exact", sc.exact.Format(time.RFC3339),
-					"next_quick", sc.quick.Format(time.RFC3339))
+		if active {
+			if err := sleepContext(ctx, daemonPollInterval); err != nil {
+				return nil
 			}
 			continue
 		}
-		if err := sleepContext(ctx, time.Until(earliest)); err != nil {
-			return nil
+		if due == nil {
+			wait := time.Until(earliest)
+			if wait > daemonIdlePoll {
+				wait = daemonIdlePoll
+			}
+			if wait < daemonPollInterval {
+				wait = daemonPollInterval
+			}
+			if err := sleepContext(ctx, wait); err != nil {
+				return nil
+			}
+			continue
 		}
+		if retry, ok := retryAt[due.root]; ok && retry.After(now) {
+			if err := sleepContext(ctx, time.Until(retry)); err != nil {
+				return nil
+			}
+			continue
+		}
+		if due.mode == model.ModeFull {
+			s.Log.Info("精确扫描到期，等待文件系统锁", "root", due.root)
+		} else {
+			s.Log.Info("快速估算到期，等待文件系统锁", "root", due.root)
+		}
+		// The scan itself takes the same lock. This short probe only tells us
+		// whether another process is currently scanning this filesystem; if it
+		// is, leave the due time unchanged and retry shortly.
+		probe, lockErr := acquireScanLock(due.root)
+		if lockErr != nil {
+			if errors.Is(lockErr, ErrRootLocked) {
+				if err := sleepContext(ctx, daemonPollInterval); err != nil {
+					return nil
+				}
+				continue
+			}
+			s.Log.Warn("检查扫描锁失败", "root", due.root, "error", lockErr.Error())
+			retryAt[due.root] = time.Now().Add(daemonRetryInterval)
+			continue
+		}
+		_ = probe.Close()
+
+		// Re-read after the probe: a manual scan may have completed while we
+		// were deciding, in which case the due time is now in the future.
+		recheck, active, _, err := s.reconcileSchedule(ctx, roots, time.Now())
+		if err != nil || active || recheck == nil || recheck.root != due.root || recheck.mode != due.mode {
+			if err != nil {
+				s.Log.Warn("扫描前复查失败", "error", err.Error())
+			}
+			if err := sleepContext(ctx, daemonPollInterval); err != nil {
+				return nil
+			}
+			continue
+		}
+		startedAt := time.Now()
+		err = s.runScheduledRoot(ctx, due.root, due.mode, startedAt)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			if errors.Is(err, model.ErrCanceled) {
+				// A user cancel is not an abnormal exit. Do not immediately
+				// restart the same scan; wait for the next regular interval.
+				wait := s.Cfg.Scan.QuickInterval.Duration
+				if due.mode == model.ModeFull {
+					wait = s.Cfg.Scan.Interval.Duration
+				}
+				if wait <= 0 {
+					wait = daemonRetryInterval
+				}
+				retryAt[due.root] = time.Now().Add(wait)
+				continue
+			}
+			if errors.Is(err, ErrRootLocked) {
+				// Another process won the lock between the probe and Scan.
+				if err := sleepContext(ctx, daemonPollInterval); err != nil {
+					return nil
+				}
+				continue
+			}
+			if errors.Is(err, ErrScanSuperseded) {
+				continue
+			}
+			s.Log.Error("定时扫描失败", "root", due.root, "error", err.Error())
+			retryAt[due.root] = time.Now().Add(daemonRetryInterval)
+			continue
+		}
+		delete(retryAt, due.root)
 	}
 }
 
-func (s *Service) runScheduledRoot(ctx context.Context, root string, mode model.ScanMode) error {
+const (
+	daemonPollInterval  = 15 * time.Second
+	daemonIdlePoll      = 5 * time.Minute
+	daemonRetryInterval = 5 * time.Minute
+)
+
+type dueScan struct {
+	root string
+	mode model.ScanMode
+}
+
+// reconcileSchedule derives all due work from the database. It never trusts a
+// cached in-memory clock, so external scans are observed at the next tick.
+func (s *Service) reconcileSchedule(ctx context.Context, roots []string, now time.Time) (due *dueScan, active bool, earliest time.Time, err error) {
+	earliest = now.Add(24 * time.Hour)
+	var exactRoot, quickRoot string
+	for _, root := range roots {
+		rootState, getErr := s.Store.GetRoot(ctx, root)
+		if getErr == nil {
+			if run, activeErr := s.Store.ActiveRun(ctx, rootState.ID); activeErr == nil && run != nil {
+				active = true
+			}
+		}
+		sc := s.nextSchedule(ctx, root)
+		if !sc.exact.After(now) && exactRoot == "" {
+			exactRoot = root
+		}
+		if !sc.quick.IsZero() && !sc.quick.After(now) && quickRoot == "" {
+			quickRoot = root
+		}
+		for _, when := range []time.Time{sc.exact, sc.quick} {
+			if when.IsZero() || when.Before(now) {
+				continue
+			}
+			if when.Before(earliest) {
+				earliest = when
+			}
+		}
+	}
+	if active {
+		return nil, true, earliest, nil
+	}
+	// Exact is a superset of quick. If both are due, run exact and let the next
+	// reconcile derive a fresh quick interval from the exact completion.
+	if exactRoot != "" {
+		return &dueScan{root: exactRoot, mode: model.ModeFull}, false, earliest, nil
+	}
+	if quickRoot != "" {
+		return &dueScan{root: quickRoot, mode: model.ModeQuick}, false, earliest, nil
+	}
+	return nil, false, earliest, nil
+}
+
+func (s *Service) runScheduledRoot(ctx context.Context, root string, mode model.ScanMode, skipIfScannedAfter time.Time) error {
 	progress := func(p model.Progress) {
 		state := ""
 		if p.Paused {
@@ -143,9 +234,10 @@ func (s *Service) runScheduledRoot(ctx context.Context, root string, mode model.
 		// Both quick and exact staging are durable. A daemon restart must
 		// resume the unfinished run of this mode instead of starting a fresh
 		// quick that would delete every completed first-level row.
-		Resume:         s.Cfg.Scan.ResumeInterrupted,
-		ResumeCanceled: false, // a user cancel is not an abnormal exit
-		Progress:       progress,
+		Resume:             s.Cfg.Scan.ResumeInterrupted,
+		ResumeCanceled:     false, // a user cancel is not an abnormal exit
+		Progress:           progress,
+		SkipIfScannedAfter: skipIfScannedAfter,
 	})
 	if err != nil {
 		return fmt.Errorf("扫描 %s 失败: %w", root, err)
@@ -207,8 +299,15 @@ func (s *Service) nextSchedule(ctx context.Context, rootPath string) scanSchedul
 			}
 		}
 	}
-	if root.LastSuccessAt == nil && s.Cfg.Scan.ScanOnStart {
-		sc.exact, sc.quick = now, now
+	if root.LastSuccessAt == nil {
+		if s.Cfg.Scan.ScanOnStart {
+			sc.exact, sc.quick = now, now
+		} else {
+			sc.exact = now.Add(s.Cfg.Scan.Interval.Duration)
+			if s.Cfg.Scan.QuickInterval.Duration > 0 {
+				sc.quick = now.Add(s.Cfg.Scan.QuickInterval.Duration)
+			}
+		}
 	} else {
 		sc.exact = root.LastSuccessAt.Add(s.Cfg.Scan.Interval.Duration)
 		if sc.exact.Before(now) {
@@ -224,7 +323,8 @@ func (s *Service) nextSchedule(ctx context.Context, rootPath string) scanSchedul
 	// Use the last exact run, not the newest quick run, to schedule the weekly
 	// exact refresh.
 	exactSeen := false
-	if run, runErr := s.Store.LastRunByMode(ctx, root.ID, model.ModeFull); runErr == nil && run.FinishedAt != nil {
+	if run, runErr := s.Store.LastRunByMode(ctx, root.ID, model.ModeFull); runErr == nil && run.FinishedAt != nil &&
+		(run.Status == model.RunCompleted || run.Status == model.RunPartial) {
 		exactSeen = true
 		sc.exact = run.FinishedAt.Add(s.Cfg.Scan.Interval.Duration)
 		if sc.exact.Before(now) {
@@ -235,14 +335,6 @@ func (s *Service) nextSchedule(ctx context.Context, rootPath string) scanSchedul
 		// A quick-only baseline is useful immediately, but it is not the exact
 		// weekly baseline. Run the exact pass on the next daemon start.
 		sc.exact = now
-	}
-	if s.Cfg.Scan.QuickInterval.Duration > 0 {
-		if run, runErr := s.Store.LastRunByMode(ctx, root.ID, model.ModeQuick); runErr == nil && run.FinishedAt != nil {
-			sc.quick = run.FinishedAt.Add(s.Cfg.Scan.QuickInterval.Duration)
-			if sc.quick.Before(now) {
-				sc.quick = now
-			}
-		}
 	}
 	// An interrupted quick run must be resumed promptly, even when the next
 	// exact scan is still in the future. The resume path reuses completed

@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.8.0"
+var Version = "1.8.1"
 
 const (
 	exitOK      = 0
@@ -127,6 +127,20 @@ func validateCommandOptions(cmd command, opts *options) error {
 	if opts.exact && cmd.name != "size" {
 		return &usageError{"--exact 仅用于 size"}
 	}
+	longCommand := cmd.name == "quick" || cmd.name == "scan" || cmd.name == "refresh" || cmd.name == "rebuild" ||
+		(cmd.name == "size" && opts.exact)
+	if opts.foreground && !longCommand {
+		return &usageError{"--foreground 仅用于 quick/scan/refresh/rebuild/size --exact"}
+	}
+	if opts.background && !longCommand {
+		return &usageError{"--background 仅用于 quick/scan/refresh/rebuild/size --exact"}
+	}
+	if opts.foreground && opts.background {
+		return &usageError{"--foreground 与 --background 不能同时使用"}
+	}
+	if opts.background && opts.json {
+		return &usageError{"--background 不能和 --json 一起使用"}
+	}
 	if opts.shard != "" && cmd.name != "scan" && cmd.name != "refresh" {
 		return &usageError{"--shard 仅用于 scan 或 refresh"}
 	}
@@ -207,6 +221,9 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(stderr, "配置错误: %v\n", err)
 		return exitRuntime
+	}
+	if detached, code := maybeDetach(args, cmd, opts, cfg, stdout, stderr); detached {
+		return code
 	}
 	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -790,6 +807,8 @@ func printHelp(w io.Writer) {
   --resume                断点续扫（scan）
   --staging-only          只显示本轮 staging，不与上次结果合并（partial）
   --exact                 未命中缓存时精确扫描目标目录作为独立根（size）
+  --foreground            长任务在前台运行，不自动转后台
+  --background            强制长任务转后台（脚本可用）
   --shard INDEX/COUNT     只扫描目标子树的一部分，结果需 merge（scan/refresh）
   --inputs <文件列表>     逗号分隔的分片数据库（merge）
   --once                  只运行一轮（daemon）

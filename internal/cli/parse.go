@@ -20,6 +20,8 @@ type options struct {
 	resume      bool
 	stagingOnly bool
 	exact       bool
+	foreground  bool
+	background  bool
 	shard       string
 	inputs      []string
 	once        bool
@@ -57,6 +59,10 @@ func parseArgs(args []string) (*options, error) {
 			opts.stagingOnly = true
 		case arg == "--exact":
 			opts.exact = true
+		case arg == "--foreground":
+			opts.foreground = true
+		case arg == "--background":
+			opts.background = true
 		case arg == "--shard":
 			if i+1 >= len(args) {
 				return nil, &usageError{fmt.Sprintf("%s 需要一个参数", arg)}
