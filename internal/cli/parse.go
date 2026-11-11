@@ -7,23 +7,24 @@ import (
 )
 
 type options struct {
-	path       string
-	configPath string
-	dbPath     string
-	logLevel   string
-	output     string
-	days       int
-	json       bool
-	logical    bool
-	full       bool
-	newOnly    bool
-	resume     bool
-	once       bool
-	vacuum     bool
-	repair     bool
-	help       bool
-	version    bool
-	positional []string
+	path        string
+	configPath  string
+	dbPath      string
+	logLevel    string
+	output      string
+	days        int
+	json        bool
+	logical     bool
+	full        bool
+	newOnly     bool
+	resume      bool
+	stagingOnly bool
+	once        bool
+	vacuum      bool
+	repair      bool
+	help        bool
+	version     bool
+	positional  []string
 }
 
 type usageError struct{ message string }
@@ -49,6 +50,8 @@ func parseArgs(args []string) (*options, error) {
 			opts.newOnly = true
 		case arg == "--resume":
 			opts.resume = true
+		case arg == "--staging-only":
+			opts.stagingOnly = true
 		case arg == "--once":
 			opts.once = true
 		case arg == "--vacuum":

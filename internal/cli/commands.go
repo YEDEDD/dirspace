@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.5.1"
+var Version = "1.6.0"
 
 const (
 	exitOK      = 0
@@ -120,6 +120,9 @@ func validateCommandOptions(cmd command, opts *options) error {
 	}
 	if opts.resume && !allowResume {
 		return &usageError{"--resume 仅用于 scan"}
+	}
+	if opts.stagingOnly && cmd.name != "partial" {
+		return &usageError{"--staging-only 仅用于 partial"}
 	}
 	if opts.path != "" && !allowPath {
 		return &usageError{"--path 仅用于查询、扫描或任务控制命令；daemon 多根请配置 extra_roots"}
@@ -289,7 +292,7 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 		return exitOK
 
 	case "partial":
-		view, err := svc.Partial(ctx, queryPath, 0)
+		view, err := svc.Partial(ctx, queryPath, 0, !opts.stagingOnly)
 		if err != nil {
 			printError(stderr, err)
 			return exitRuntime
@@ -663,7 +666,7 @@ func printHelp(w io.Writer) {
   top <N>             显示空间排名前 N 个一级目录（默认 10）
   list                显示全部一级目录
   children            显示目录索引中某个目录的直接子目录（--path 指定）
-  partial             显示当前扫描已完成的一级目录（staging，含完整名称）
+  partial             显示本轮已完成目录，未完成的沿用上次结果（--staging-only 只看本轮）
   status              显示缓存、任务、进度和数据库状态
   config explain      显示最终生效的配置和推导值
   scan                执行一次精确全量扫描（默认）
@@ -689,6 +692,7 @@ func printHelp(w io.Writer) {
   --full                  强制全量（scan/refresh）
   --new                   只扫描新增或失效的一级目录（scan，需要已有基线）
   --resume                断点续扫（scan）
+  --staging-only          只显示本轮 staging，不与上次结果合并（partial）
   --once                  只运行一轮（daemon）
   --days <N>              清理早于 N 天的历史（cleanup）
   --vacuum                清理后 VACUUM（cleanup）
@@ -704,6 +708,7 @@ func printHelp(w io.Writer) {
   dirspace list --json
   dirspace children --path /data/cache-a
   dirspace partial --path /mnt
+  dirspace partial --path /mnt --staging-only
   dirspace --path /data top 10
   dirspace scan --path /data
   dirspace scan --new --path /data

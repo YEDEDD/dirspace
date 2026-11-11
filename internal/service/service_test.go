@@ -480,17 +480,79 @@ func TestPartialReturnsCompleteStagedNames(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	view, err := f.svc.Partial(context.Background(), root, 0)
+	view, err := f.svc.Partial(context.Background(), root, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if view.Run == nil || view.Run.ID != run.ID {
 		t.Fatalf("unexpected run: %+v", view.Run)
 	}
-	if len(view.Dirs) != 1 || view.Dirs[0].Name != longName {
+	if len(view.Dirs) != 1 || view.Dirs[0].Dir.Name != longName {
 		t.Fatalf("partial dirs: %+v", view.Dirs)
 	}
-	if view.Dirs[0].AllocBytes != 7<<40 {
+	if view.Dirs[0].Dir.AllocBytes != 7<<40 {
 		t.Fatalf("partial bytes: %+v", view.Dirs[0])
+	}
+	if view.Dirs[0].Source != PartialSourceCurrent {
+		t.Fatalf("partial source: %+v", view.Dirs[0])
+	}
+}
+
+func TestPartialMergesCurrentWithLastPublished(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	mkFile(t, filepath.Join(root, "beta", "b"), 2048)
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeQuick, SizeBasis: model.BasisAllocated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, out := range []model.DirOutcome{
+		{Name: "alpha", AllocBytes: 7 << 20, FileCount: 2, DirCount: 1, CompletedAt: time.Now()},
+		{Name: "gamma", AllocBytes: 3 << 20, FileCount: 3, DirCount: 2, CompletedAt: time.Now()},
+	} {
+		if err := f.store.SaveDirResult(context.Background(), run.ID, out); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	view, err := f.svc.Partial(context.Background(), root, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Mixed || view.FreshDirs != 2 || view.CarriedDirs != 1 {
+		t.Fatalf("unexpected merge counts: %+v", view)
+	}
+	found := map[string]PartialDir{}
+	for _, item := range view.Dirs {
+		found[item.Dir.Name] = item
+	}
+	if got := found["alpha"]; got.Source != PartialSourceCurrent || got.Dir.AllocBytes != 7<<20 {
+		t.Fatalf("alpha should be current: %+v", got)
+	}
+	if got := found["beta"]; got.Source != PartialSourceLast || got.Dir.AllocBytes == 0 {
+		t.Fatalf("beta should be carried: %+v", got)
+	}
+	if got := found["gamma"]; got.Source != PartialSourceCurrent || got.Dir.AllocBytes != 3<<20 {
+		t.Fatalf("gamma should be current: %+v", got)
+	}
+
+	stagingOnly, err := f.svc.Partial(context.Background(), root, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stagingOnly.CarriedDirs != 0 || stagingOnly.Mixed {
+		t.Fatalf("staging only should not carry rows: %+v", stagingOnly)
+	}
+	for _, item := range stagingOnly.Dirs {
+		if item.Dir.Name == "beta" {
+			t.Fatalf("staging only unexpectedly contains beta: %+v", stagingOnly.Dirs)
+		}
 	}
 }

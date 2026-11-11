@@ -156,6 +156,10 @@ func TestCLIUsageErrors(t *testing.T) {
 	if code != exitRuntime {
 		t.Fatalf("pause exit=%d", code)
 	}
+	code, _, _ = runCLI(t, "--staging-only", "status")
+	if code != exitUsage {
+		t.Fatalf("staging-only on status exit=%d", code)
+	}
 }
 
 func TestCLIVersionHelp(t *testing.T) {

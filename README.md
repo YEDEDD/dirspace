@@ -51,7 +51,7 @@ dirspace quick                # 先跑快速估算，几分钟到几小时出近
 dirspace scan                 # 再跑精确全量，建立准确基线
 dirspace top 20               # 查询只读 SQLite
 dirspace children --path /mnt/cae365  # 查看一级目录下的多级明细
-dirspace partial              # 扫描中查看已完成目录（staging，完整名称）
+dirspace partial              # 扫描中查看本轮已完成目录，未完成的沿用上次（合并视图）
 dirspace status               # 进度、ETA、已完成目录合计、数据库
 ```
 
@@ -190,9 +190,20 @@ profile 只是基线，`performance` 下的字段可以覆盖它。三个 profil
 
 - 扫描时发现目录已删除，旧行标记为 `stale`，不会立刻删除，避免短暂挂载异常造成数据丢失
 - `top` / `list` 默认隐藏 `stale` 行，`status` 会显示隐藏行数
-- 扫描进行中，顶层结果还在 staging；用 `partial` 查看已完成目录，整轮完成后才发布到 `top/list`
+- 扫描进行中，`partial` 默认显示合并视图：本轮已完成的目录用本轮结果，本轮未完成的目录沿用上次成功结果，并标注来源；正式 `top_dirs` 仍只在整轮完成后原子发布。加 `--staging-only` 可只看本轮 staging
 - `database.stale_retention_days` 默认 7 天，daemon 每次扫描后自动清理
 - `database.retention_days` 默认 90 天，控制历史统计
+
+### 扫描中的 partial 合并视图
+
+`partial` 不会覆盖已经发布的 `top_dirs`，只在读取时合并：
+
+- 本轮已经完成的目录：显示本轮结果，来源标记为“本轮”
+- 本轮还没完成的目录：显示上次成功结果，来源标记为“上次”
+- 本轮新增目录：显示本轮结果
+- 本轮失败或尚未扫到的目录：保留上次结果，完成前不删除
+
+输出会分别给出“本轮已完成”“沿用上次”和“混合合计”。混合合计不是同一时点的完整快照，不能用于计费或严格趋势对比。`partial --staging-only` 可以只看本轮 staging，保持旧行为；JSON 中每行带 `source`，顶层带 `mixed`、`fresh_dirs`、`carried_dirs`、`fresh_total_bytes`、`carried_total_bytes`、`merged_total_bytes`。
 
 ### 高级覆盖
 
@@ -289,7 +300,8 @@ sudo systemctl daemon-reload
 | `dirspace` / `dirspace top 20` | 一级目录空间排名，显示数据时间、状态、耗时 |
 | `dirspace list` | 全部可见一级目录（完整名称） |
 | `dirspace children --path /mnt/a` | 查看目录索引中 a 的直接子目录（受 index_depth/top_k 限制） |
-| `dirspace partial` | 当前扫描已完成的 staging 目录、完整名称、合计空间 |
+| `dirspace partial` | 扫描中查看合并视图：本轮已完成目录 + 上次未完成目录，标注来源和合计 |
+| `dirspace partial --staging-only` | 只看本轮 staging，不合并上次结果 |
 | `dirspace status` | 缓存、当前任务、已完成目录合计、预计剩余、隐藏 stale 行、数据库 |
 | `dirspace config explain` | 最终生效配置和自动推导值 |
 | `dirspace quick` | 快速抽样估算，标记 `sampled` |

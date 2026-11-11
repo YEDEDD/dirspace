@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -313,19 +314,43 @@ func (s *Service) findScannedRoot(ctx context.Context, path string) (*model.Root
 	}
 }
 
-// PartialView is the in-progress staging data of a scan run. These rows are
-// deliberately separate from the published top-level cache.
-type PartialView struct {
-	Path      string
-	Root      model.Root
-	Run       *model.Run
-	Dirs      []model.DirStat
-	SizeBasis model.SizeBasis
+// PartialSource identifies where a merged partial-view row came from.
+type PartialSource string
+
+const (
+	PartialSourceCurrent PartialSource = "current"
+	PartialSourceLast    PartialSource = "last"
+)
+
+// PartialDir is one first-level row in a partial view. Current rows come from
+// the active run's staging table; Last rows are the published result that the
+// active run has not replaced yet.
+type PartialDir struct {
+	Dir    model.DirStat
+	Source PartialSource
 }
 
-// Partial returns completed first-level directories from the active run, or
-// from the latest interrupted run when no process is currently scanning.
-func (s *Service) Partial(ctx context.Context, path string, limit int) (*PartialView, error) {
+// PartialView is the in-progress staging data of a scan run, optionally merged
+// with the last published result for directories the active run has not
+// completed. The merge is read-only and never changes top_dirs.
+type PartialView struct {
+	Path         string
+	Root         model.Root
+	Run          *model.Run
+	Dirs         []PartialDir
+	SizeBasis    model.SizeBasis
+	FreshDirs    int
+	CarriedDirs  int
+	FreshBytes   int64
+	CarriedBytes int64
+	Mixed        bool
+}
+
+// Partial returns a merged view when includeLast is true: current staged rows
+// override the last published rows by name, and unpublished names are carried
+// from the previous successful scan. With includeLast false it returns only the
+// active run's staging rows, preserving the old behavior.
+func (s *Service) Partial(ctx context.Context, path string, limit int, includeLast bool) (*PartialView, error) {
 	requested, err := config.NormalizeAbsolutePath(path)
 	if err != nil {
 		return nil, err
@@ -355,7 +380,7 @@ func (s *Service) Partial(ctx context.Context, path string, limit int) (*Partial
 	} else if err != nil {
 		return nil, err
 	}
-	dirs, err := s.Store.StagedDirs(ctx, run.ID, limit, s.sizeBasis())
+	staged, err := s.Store.StagedDirs(ctx, run.ID, 0, s.sizeBasis())
 	if err != nil {
 		return nil, err
 	}
@@ -366,15 +391,66 @@ func (s *Service) Partial(ctx context.Context, path string, limit int) (*Partial
 	case model.ModeIncremental:
 		accuracy = model.AccuracyIncremental
 	}
-	for i := range dirs {
-		dirs[i].RootID = root.ID
-		dirs[i].DataStatus = model.DataFresh
-		dirs[i].Accuracy = accuracy
+	for i := range staged {
+		staged[i].RootID = root.ID
+		staged[i].Accuracy = accuracy
+		if staged[i].Truncated {
+			staged[i].DataStatus = model.DataPartial
+		} else {
+			staged[i].DataStatus = model.DataFresh
+		}
 	}
-	return &PartialView{
-		Path: requested, Root: *root, Run: run, Dirs: dirs,
+
+	view := &PartialView{
+		Path: requested, Root: *root, Run: run,
 		SizeBasis: s.sizeBasis(),
-	}, nil
+	}
+	byName := make(map[string]bool, len(staged))
+	for _, d := range staged {
+		byName[d.Name] = true
+		view.Dirs = append(view.Dirs, PartialDir{Dir: d, Source: PartialSourceCurrent})
+	}
+	if includeLast {
+		published, err := s.Store.ListDirs(ctx, root.ID, 0, s.sizeBasis())
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range published {
+			if byName[d.Name] {
+				continue
+			}
+			view.Dirs = append(view.Dirs, PartialDir{Dir: d, Source: PartialSourceLast})
+		}
+	}
+	sort.SliceStable(view.Dirs, func(i, j int) bool {
+		left, right := partialBytes(view.Dirs[i].Dir, view.SizeBasis), partialBytes(view.Dirs[j].Dir, view.SizeBasis)
+		if left != right {
+			return left > right
+		}
+		return view.Dirs[i].Dir.Name < view.Dirs[j].Dir.Name
+	})
+	if limit > 0 && len(view.Dirs) > limit {
+		view.Dirs = view.Dirs[:limit]
+	}
+	for _, item := range view.Dirs {
+		switch item.Source {
+		case PartialSourceCurrent:
+			view.FreshDirs++
+			view.FreshBytes += partialBytes(item.Dir, view.SizeBasis)
+		case PartialSourceLast:
+			view.CarriedDirs++
+			view.CarriedBytes += partialBytes(item.Dir, view.SizeBasis)
+		}
+	}
+	view.Mixed = view.FreshDirs > 0 && view.CarriedDirs > 0
+	return view, nil
+}
+
+func partialBytes(d model.DirStat, basis model.SizeBasis) int64 {
+	if basis == model.BasisLogical {
+		return d.LogicalBytes
+	}
+	return d.AllocBytes
 }
 
 // StatusView is the read-only state summary shown by "status".
