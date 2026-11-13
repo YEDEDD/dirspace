@@ -25,7 +25,7 @@ scan:
   # read_batch_size: 1024          # 每次 ReadDir 的目录项数，默认 1024
   # index_depth: 3                 # 目录索引深度，0 关闭
   # index_top_k: 20                # 每层保留的 top K 子目录
-  # index_all_dirs: false          # 保存每个目录聚合，数据库会变大
+  # index_all_dirs: true           # 保存每个目录聚合；数据库会变大，可设 false 改用 depth/top_k
   # quick_max_files_per_top: 0     # 0 不限制；>0 超出后标记 partial
   # scan_on_start: true            # 首次启动立即建基线
   # startup_delay: 15s             # 启动延迟，避开开机高峰

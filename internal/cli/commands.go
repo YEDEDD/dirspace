@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.10.0"
+var Version = "1.11.0"
 
 const (
 	exitOK      = 0
@@ -54,7 +54,17 @@ func parseCommand(positional []string) (command, error) {
 			return command{}, err
 		}
 		return command{name: name, args: rest}, nil
-	case "children", "list", "partial", "status", "size", "fs-usage", "merge", "monitor", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
+	case "children":
+		if len(rest) > 1 {
+			return command{}, &usageError{"children 只接受一个可选数量参数"}
+		}
+		if len(rest) == 1 {
+			if _, err := parsePositiveInt(rest[0], "children 数量"); err != nil {
+				return command{}, err
+			}
+		}
+		return command{name: name, args: rest}, nil
+	case "list", "partial", "status", "size", "fs-usage", "merge", "monitor", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
 		"cleanup", "backup", "doctor":
 		if len(rest) > 0 {
 			return command{}, &usageError{fmt.Sprintf("%s 不接受位置参数: %s", name, strings.Join(rest, " "))}
@@ -324,7 +334,15 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 		return exitOK
 
 	case "children":
-		view, err := svc.Children(ctx, queryPath, 0)
+		limit := 0
+		if len(cmd.args) == 1 {
+			limit, err = parsePositiveInt(cmd.args[0], "children 数量")
+			if err != nil {
+				fmt.Fprintf(stderr, "参数错误: %v\n", err)
+				return exitUsage
+			}
+		}
+		view, err := svc.Children(ctx, queryPath, limit)
 		if err != nil {
 			printError(stderr, err)
 			return exitRuntime
@@ -796,7 +814,7 @@ func printHelp(w io.Writer) {
   （无命令）          等同于 top 10
   top <N>             显示空间排名前 N 个一级目录（默认 10）
   list                显示全部一级目录
-  children            显示目录索引中某个目录的直接子目录（--path 指定）
+  children [N]        显示目录索引中某个目录的直接子目录（--path 指定；N 可选）
   size                查询一个目录的已缓存大小；--exact 未命中时精扫该目录
   fs-usage            查询整个挂载点的容量、已用和可用空间（statfs）
   merge               合并多个分片数据库（--db 目标库，--inputs 分片列表）
@@ -846,7 +864,7 @@ func printHelp(w io.Writer) {
   dirspace
   dirspace top 20
   dirspace list --json
-  dirspace children --path /data/cache-a
+  dirspace children --path /data/cache-a 100
   dirspace size --path /data/cache-a
   dirspace size --path /data/cache-a --exact
   dirspace monitor --path /mnt

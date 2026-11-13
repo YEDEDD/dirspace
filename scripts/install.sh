@@ -10,24 +10,41 @@ STATE_DIR="/var/lib/dirspace"
 UNIT_FILE="/etc/systemd/system/dirspace.service"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 START_SERVICE=1
+BINARY_OVERRIDE=""
 
 usage() {
   cat <<'USAGE'
-用法: sudo scripts/install.sh [--no-start]
+用法: sudo scripts/install.sh [--binary <文件>] [--no-start]
 
-  --no-start   安装并 enable，但不立即启动服务
-  -h, --help   显示帮助
+  --binary <文件>  指定 Linux 二进制；默认自动找 bin/dirspace 或
+                   bin/dirspace-linux-<架构>
+  --no-start       安装并 enable，但不立即启动服务
+  -h, --help       显示帮助
 
-可通过环境变量覆盖：
-  DIRSPACE_BINARY=/path/to/dirspace   使用已编译好的 Linux 二进制
+也可用环境变量 DIRSPACE_BINARY=/path/to/dirspace。
 USAGE
 }
 
-for arg in "$@"; do
-  case "$arg" in
-    --no-start) START_SERVICE=0 ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "未知参数: $arg" >&2; usage >&2; exit 2 ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --binary)
+      [[ $# -ge 2 ]] || { echo "错误: --binary 需要文件路径" >&2; exit 2; }
+      BINARY_OVERRIDE="$2"
+      shift 2
+      ;;
+    --no-start)
+      START_SERVICE=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "未知参数: $1" >&2
+      usage >&2
+      exit 2
+      ;;
   esac
 done
 
@@ -41,19 +58,35 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-BINARY="${DIRSPACE_BINARY:-${PROJECT_DIR}/bin/dirspace}"
+DEFAULT_BINARY="${PROJECT_DIR}/bin/dirspace"
+case "$(uname -m)" in
+  x86_64|amd64) ARCH_BINARY="${PROJECT_DIR}/bin/dirspace-linux-amd64" ;;
+  aarch64|arm64) ARCH_BINARY="${PROJECT_DIR}/bin/dirspace-linux-arm64" ;;
+  *) ARCH_BINARY="" ;;
+esac
+if [[ ! -x "$DEFAULT_BINARY" && -n "$ARCH_BINARY" && -x "$ARCH_BINARY" ]]; then
+  DEFAULT_BINARY="$ARCH_BINARY"
+fi
+BINARY="${BINARY_OVERRIDE:-${DIRSPACE_BINARY:-$DEFAULT_BINARY}}"
 if [[ ! -x "$BINARY" ]]; then
   echo "未找到可执行文件: $BINARY"
-  if command -v go >/dev/null 2>&1; then
+  if command -v go >/dev/null 2>&1 && [[ -d "${PROJECT_DIR}/cmd/dirspace" ]]; then
     echo "尝试使用 Go 编译..."
     mkdir -p "${PROJECT_DIR}/bin"
     (cd "$PROJECT_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/dirspace ./cmd/dirspace)
     BINARY="${PROJECT_DIR}/bin/dirspace"
   else
-    echo "错误: 请先在构建机执行 'make build-linux'，再用 DIRSPACE_BINARY 指定文件。" >&2
+    echo "错误: 请用 --binary 指定 Linux 二进制，或使用 Release 压缩包。" >&2
     exit 1
   fi
 fi
+for asset in configs/config.yaml deploy/dirspace.service README.md; do
+  if [[ ! -f "${PROJECT_DIR}/${asset}" ]]; then
+    echo "错误: 缺少安装文件 ${PROJECT_DIR}/${asset}" >&2
+    echo "请使用 Release 压缩包，或在仓库根目录执行 scripts/install.sh。" >&2
+    exit 1
+  fi
+done
 if ! file "$BINARY" 2>/dev/null | grep -q 'ELF'; then
   echo "警告: 未检测到 ELF 二进制，请确认这是 Linux 版本。" >&2
 fi
@@ -74,7 +107,7 @@ chmod 0750 "$CONFIG_DIR"
 install -d -m 0700 "$STATE_DIR"
 echo "数据目录: $STATE_DIR（已有数据库不会被覆盖）"
 
-echo "安装 systemd 单元"
+echo "安装 systemd 单元到 ${UNIT_FILE}"
 install -D -m 0644 "${PROJECT_DIR}/deploy/dirspace.service" "$UNIT_FILE"
 install -D -m 0644 "${PROJECT_DIR}/README.md" /usr/share/doc/dirspace/README.md
 

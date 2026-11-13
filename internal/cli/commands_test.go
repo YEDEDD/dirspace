@@ -97,6 +97,19 @@ func TestCLIEndToEnd(t *testing.T) {
 		t.Fatalf("children=%v", output["children"])
 	}
 
+	code, stdout, stderr = runCLI(t, "--db", db, "--path", root, "children", "1", "--json")
+	if code != 0 {
+		t.Fatalf("children limit exit=%d stderr=%s", code, stderr)
+	}
+	output = nil
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("children limit json: %v\n%s", err, stdout)
+	}
+	children, ok = output["children"].([]any)
+	if !ok || len(children) != 1 {
+		t.Fatalf("limited children=%v", output["children"])
+	}
+
 	code, stdout, stderr = runCLI(t, "--db", db, "--path", root, "size", "--json")
 	if code != 0 {
 		t.Fatalf("size exit=%d stderr=%s", code, stderr)

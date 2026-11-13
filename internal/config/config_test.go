@@ -192,6 +192,9 @@ func TestDefaultIntervalIsWeekly(t *testing.T) {
 	if got := Default().Scan.QuickSamplePercent; got != 2 {
 		t.Fatalf("default quick sample=%d", got)
 	}
+	if !Default().Scan.IndexAllDirs {
+		t.Fatal("default index_all_dirs should be true")
+	}
 	if got := Default().Scan.QuickCensusFiles; got != 16 {
 		t.Fatalf("default quick census=%d", got)
 	}

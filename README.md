@@ -1,19 +1,27 @@
 # dirspace
 
-`dirspace` 是面向 Linux 的目录空间扫描与缓存服务，适合 NFS、CFS、Lustre 等共享文件系统。它只读元数据，统计扫描根下**一级子目录**的空间、文件数、子目录数、耗时和准确性，并把受限深度的目录索引写入本地 SQLite。日常查询只读本地缓存。
+`dirspace` 是面向 Linux 的目录空间扫描与缓存服务，适合 NFS、CFS、Lustre 等共享文件系统。它只读元数据，统计扫描根下**一级子目录**的空间、文件数、子目录数、耗时和准确性，并把目录索引写入本地 SQLite。日常查询只读本地缓存。
 
 GitHub: <https://github.com/YEDEDD/dirspace>
 
 ## 快速开始
 
-需要 Go 1.27+，也可以直接用 Release 中的 Linux 二进制。
+需要 Go 1.27+，也可以直接用 Release 中的 Linux 压缩包。
 
 ```bash
-make build-linux
-sudo DIRSPACE_BINARY=bin/dirspace-linux-amd64 scripts/install.sh
+tar xzf dirspace-1.11.0-linux-amd64.tar.gz
+cd dirspace-1.11.0-linux-amd64
+sudo ./scripts/install.sh
 ```
 
-安装脚本会安装二进制、配置、systemd 单元和数据目录，默认启用 `dirspace.service`。已有配置和数据库不会被覆盖。
+安装脚本会自动放入：
+
+- 二进制：`/usr/local/bin/dirspace`
+- 配置：`/etc/dirspace/config.yaml`
+- systemd：`/etc/systemd/system/dirspace.service`
+- 数据目录：`/var/lib/dirspace/`
+
+默认 enable 并启动 `dirspace.service`；已有配置和数据库不会被覆盖。仓库内构建也可以用 `make build-linux` 后执行 `sudo scripts/install.sh`。
 
 首次使用：
 
@@ -22,7 +30,7 @@ dirspace config explain                 # 最终配置、挂载和自动推导�
 dirspace quick --path /mnt              # 先出近似结果
 dirspace scan --path /mnt               # 再建精确基线
 dirspace top 20
-dirspace children --path /mnt/cae365
+dirspace children --path /mnt/cae365 100
 dirspace size --path /mnt/cae365        # 未命中可加 --exact
 dirspace status --path /mnt
 dirspace monitor --path /mnt
@@ -72,7 +80,7 @@ scan:
   require_mount_point: true
 ```
 
-其余走默认值：`quick_sample_percent: 2`、`quick_census_files: 16`、`read_batch_size: 1024`、`index_depth: 3`、`index_top_k: 20`、`index_all_dirs: false`、自动内存上限。配置文件里只写要覆盖的项；`configs/config.yaml` 保留了所有可选键的注释和默认值，需要时取消注释即可。旧配置中的 `performance` 段仍会覆盖默认值。
+其余走默认值：`quick_sample_percent: 2`、`quick_census_files: 16`、`read_batch_size: 1024`、`index_all_dirs: true`、自动内存上限。配置文件里只写要覆盖的项；`configs/config.yaml` 保留了所有可选键的注释和默认值，需要时取消注释即可。旧配置中的 `performance` 段仍会覆盖默认值。
 
 生产环境建议保留 `require_mount_point: true`，避免挂载未就绪时误扫本地盘。`root_path` 可以是非根文件系统的挂载点或挂载点下的子目录。
 
@@ -86,14 +94,16 @@ profile 基线：
 
 `concurrency: auto` 按一级目录数分配 worker，内部由共享信号量限制总并发。QPS 从上限约 1/3 起步，压力正常时逐步升高。`memory_limit: auto` 优先取 cgroup 上限的 80%，否则取物理内存 10%，范围 256MB–4GB。
 
-目录索引用于 `children`：一级目录全部保留，更深层每级只保留 top K。`index_all_dirs: true` 会保存每个目录的聚合，`size` 可查任意深层路径，但数据库会变大。索引不增加 NFS 读取次数，完整扫描成功后原子替换。
+目录索引用于 `children` 和 `size`。默认 `index_all_dirs: true`，会保存每个目录的聚合，`children` 能列任意目录的直接子目录，`size` 能查任意深层路径；代价是数据库随目录数增长，`children` 输出也可能很多，建议加数量限制，例如 `dirspace children --path /mnt/a 100`。
+
+如果只想保留每层 top K，把 `index_all_dirs` 设为 `false`，再配合 `index_depth` 和 `index_top_k`。索引不增加 NFS 读取次数，完整扫描成功后原子替换；修改索引配置需要重新扫描才会填充。
 
 ## 常用命令
 
 | 命令 | 作用 |
 |---|---|
 | `dirspace top 20` / `list` | 一级目录排名 / 全部可见目录 |
-| `dirspace children --path /mnt/a` | 查看索引中的直接子目录 |
+| `dirspace children --path /mnt/a [N]` | 查看索引中的直接子目录，N 限制行数 |
 | `dirspace size --path /mnt/a` | 查缓存大小；`--exact` 未命中时精扫该目录 |
 | `dirspace fs-usage --path /mnt` | 文件系统容量，不是目录大小 |
 | `dirspace status` | 当前任务、进度、ETA、QPS、worker、数据库 |

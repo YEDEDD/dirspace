@@ -594,6 +594,7 @@ func TestProgressActiveKeepsSlowWorkerVisible(t *testing.T) {
 
 func TestDirectoryIndexDepthAndTopK(t *testing.T) {
 	f := newScannerFixture(t)
+	f.cfg.Scan.IndexAllDirs = false
 	f.cfg.Scan.IndexDepth = 2
 	f.cfg.Scan.IndexTopK = 2
 	writeFile(t, filepath.Join(f.root, "a", "b1", "big.bin"), 4<<20)

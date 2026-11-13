@@ -446,7 +446,7 @@ func DefaultForProfile(name string) *Config {
 			ReadBatchSize:       1024,
 			IndexDepth:          3,
 			IndexTopK:           20,
-			IndexAllDirs:        false,
+			IndexAllDirs:        true,
 			QuickMaxFilesPerTop: 0,
 			ScanOnStart:         true,
 			StartupDelay:        Duration{15 * time.Second},
