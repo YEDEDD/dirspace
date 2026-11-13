@@ -84,3 +84,19 @@ func TestCPUGuardDisabled(t *testing.T) {
 		t.Fatal("disabled CPU guard slept")
 	}
 }
+
+func TestThrottleHighRateIsNotCappedAtOneMillisecond(t *testing.T) {
+	throttle := NewThrottle(10000, 1)
+	ctx := context.Background()
+	start := time.Now()
+	for i := 0; i < 20; i++ {
+		if err := throttle.Wait(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 20 calls at 10000 QPS should take about 2ms. The old 1ms floor made
+	// every retry wait at least 1ms and took roughly 20ms.
+	if elapsed := time.Since(start); elapsed > 10*time.Millisecond {
+		t.Fatalf("throttle too slow at 10000 QPS: %v", elapsed)
+	}
+}

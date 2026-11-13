@@ -7,15 +7,30 @@ import (
 	"time"
 )
 
-// Throttle is a strict, dynamically adjustable token bucket for NFS metadata
-// operations. Capacity is one token, so the configured QPS is a real cap rather
-// than a burst size.
+// Throttle is a dynamically adjustable token bucket for metadata operations.
+// It keeps a 10ms burst window so high QPS limits are not defeated by timer
+// granularity; the sustained rate remains the configured QPS.
 type Throttle struct {
-	mu     sync.Mutex
-	rate   float64
-	min    float64
-	tokens float64
-	last   time.Time
+	mu       sync.Mutex
+	rate     float64
+	min      float64
+	capacity float64
+	tokens   float64
+	last     time.Time
+}
+
+// bucketCapacity gives the bucket a small burst window (10ms of tokens) so
+// high QPS settings are not limited by the kernel/Go timer granularity. The
+// sustained rate still follows rate; only a short burst is absorbed.
+func bucketCapacity(rate float64) float64 {
+	capacity := rate / 100
+	if capacity < 1 {
+		capacity = 1
+	}
+	if capacity > 256 {
+		capacity = 256
+	}
+	return capacity
 }
 
 // NewThrottle creates a throttle. rate and min are requests per second.
@@ -29,11 +44,14 @@ func NewThrottle(rate, min int) *Throttle {
 	if min > rate {
 		min = rate
 	}
+	rateF := float64(rate)
+	capacity := bucketCapacity(rateF)
 	return &Throttle{
-		rate:   float64(rate),
-		min:    float64(min),
-		tokens: 1,
-		last:   time.Now(),
+		rate:     rateF,
+		min:      float64(min),
+		capacity: capacity,
+		tokens:   capacity,
+		last:     time.Now(),
 	}
 }
 
@@ -47,7 +65,7 @@ func (t *Throttle) Wait(ctx context.Context) error {
 		t.mu.Lock()
 		elapsed := now.Sub(t.last).Seconds()
 		if elapsed > 0 {
-			t.tokens = math.Min(1, t.tokens+elapsed*t.rate)
+			t.tokens = math.Min(t.capacity, t.tokens+elapsed*t.rate)
 			t.last = now
 		}
 		if t.tokens >= 1 {
@@ -57,8 +75,12 @@ func (t *Throttle) Wait(ctx context.Context) error {
 		}
 		wait := time.Duration((1 - t.tokens) / t.rate * float64(time.Second))
 		t.mu.Unlock()
-		if wait < time.Millisecond {
-			wait = time.Millisecond
+		// Do not round short waits up to a millisecond: at 4000 QPS the
+		// next token is only 250µs away, and a 1ms floor silently caps the
+		// bucket at about 1000 QPS. Keep a small floor only to avoid
+		// zero-duration timers at extreme configured rates.
+		if wait < 20*time.Microsecond {
+			wait = 20 * time.Microsecond
 		}
 		timer := time.NewTimer(wait)
 		select {
@@ -78,8 +100,9 @@ func (t *Throttle) SetRate(rate float64) {
 		rate = t.min
 	}
 	t.rate = rate
-	if t.tokens > 1 {
-		t.tokens = 1
+	t.capacity = bucketCapacity(rate)
+	if t.tokens > t.capacity {
+		t.tokens = t.capacity
 	}
 }
 
