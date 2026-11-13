@@ -46,3 +46,18 @@ func TestFSTypeClass(t *testing.T) {
 		}
 	}
 }
+
+func TestTargetCoversRootFilesystem(t *testing.T) {
+	if !targetCovers("/", "/data") {
+		t.Fatal("root filesystem must cover /data")
+	}
+	if !targetCovers("/", "/") {
+		t.Fatal("root filesystem must cover itself")
+	}
+	if targetCovers("/data", "/database") {
+		t.Fatal("prefix must respect path boundary")
+	}
+	if !targetCovers("/data", "/data/sub") {
+		t.Fatal("subdirectory should match")
+	}
+}

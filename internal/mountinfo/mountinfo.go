@@ -56,7 +56,7 @@ func InfoForPath(path string) (Mount, bool) {
 	found := false
 	for _, m := range mounts {
 		target := filepath.Clean(m.Target)
-		if path == target || strings.HasPrefix(path, target+string(filepath.Separator)) {
+		if targetCovers(target, path) {
 			if !found || len(target) > len(best.Target) {
 				best = m
 				found = true
@@ -64,6 +64,18 @@ func InfoForPath(path string) (Mount, bool) {
 		}
 	}
 	return best, found
+}
+
+// targetCovers reports whether a cleaned mount target contains path. The root
+// target is special: joining "/" with a separator produces "//", so a plain
+// prefix check would miss every ordinary path on the root filesystem.
+func targetCovers(target, path string) bool {
+	target = filepath.Clean(target)
+	path = filepath.Clean(path)
+	if target == string(filepath.Separator) {
+		return true
+	}
+	return path == target || strings.HasPrefix(path, target+string(filepath.Separator))
 }
 
 // IsNetworkFS reports whether a path resides on a remote or FUSE-backed
