@@ -120,6 +120,105 @@ func parentIndexPath(path string) string {
 	return ""
 }
 
+// liveRows returns a bounded snapshot of completed directories for the active
+// run. Unlike rows, it always applies depth/topK and marks the rows partial;
+// it is safe to call while scanning continues.
+const liveIndexRowCap = 100000
+
+func (c *rollupCollector) liveRows(maxDepth, topK int, now time.Time) []model.DirIndexEntry {
+	if c == nil {
+		return nil
+	}
+	if maxDepth < 1 {
+		maxDepth = 1
+	}
+	if topK < 1 {
+		topK = 1
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	children := make(map[string][]string)
+	for path := range c.nodes {
+		depth := strings.Count(path, "/") + 1
+		if depth > maxDepth {
+			continue
+		}
+		children[parentIndexPath(path)] = append(children[parentIndexPath(path)], path)
+	}
+	for parent := range children {
+		sort.Slice(children[parent], func(i, j int) bool {
+			a, b := c.nodes[children[parent][i]], c.nodes[children[parent][j]]
+			if a.agg.allocBytes != b.agg.allocBytes {
+				return a.agg.allocBytes > b.agg.allocBytes
+			}
+			return a.path < b.path
+		})
+	}
+
+	selected := make(map[string]bool)
+	for _, path := range children[""] {
+		if len(selected) >= liveIndexRowCap {
+			break
+		}
+		selected[path] = true
+	}
+	for depth := 1; depth < maxDepth; depth++ {
+		var parents []string
+		for path := range selected {
+			if strings.Count(path, "/")+1 == depth {
+				parents = append(parents, path)
+			}
+		}
+		sort.Strings(parents)
+		for _, parent := range parents {
+			if len(selected) >= liveIndexRowCap {
+				break
+			}
+			kids := children[parent]
+			if len(kids) > topK {
+				kids = kids[:topK]
+			}
+			for _, child := range kids {
+				if len(selected) >= liveIndexRowCap {
+					break
+				}
+				selected[child] = true
+			}
+		}
+	}
+
+	result := make([]model.DirIndexEntry, 0, len(selected))
+	for path := range selected {
+		n := c.nodes[path]
+		if n == nil || strings.Count(path, "/")+1 > maxDepth {
+			continue
+		}
+		name := path
+		if i := strings.LastIndexByte(path, '/'); i >= 0 {
+			name = path[i+1:]
+		}
+		if len(result) >= liveIndexRowCap {
+			break
+		}
+		result = append(result, model.DirIndexEntry{
+			Path: path, ParentPath: parentIndexPath(path), Name: name,
+			Depth:      strings.Count(path, "/") + 1,
+			AllocBytes: n.agg.allocBytes, LogicalBytes: n.agg.logicalBytes,
+			FileCount: n.agg.fileCount, DirCount: n.agg.dirCount,
+			SymlinkCount: n.agg.symlinkCount, DataStatus: model.DataPartial,
+			Accuracy: c.accuracy, Truncated: n.truncated, UpdatedAt: now,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Depth != result[j].Depth {
+			return result[i].Depth < result[j].Depth
+		}
+		return result[i].Path < result[j].Path
+	})
+	return result
+}
+
 // rows selects the top-K children of every indexed parent. Top-level entries
 // are always retained; descendants are retained only when their parent was
 // retained. This keeps the index bounded (topK^depth) without storing every
@@ -155,6 +254,9 @@ func (c *rollupCollector) rows(now time.Time) []model.DirIndexEntry {
 			name := path
 			if i := strings.LastIndexByte(path, '/'); i >= 0 {
 				name = path[i+1:]
+			}
+			if len(result) >= liveIndexRowCap {
+				break
 			}
 			result = append(result, model.DirIndexEntry{
 				Path:         path,
@@ -211,6 +313,9 @@ func (c *rollupCollector) rows(now time.Time) []model.DirIndexEntry {
 		name := path
 		if i := strings.LastIndexByte(path, '/'); i >= 0 {
 			name = path[i+1:]
+		}
+		if len(result) >= liveIndexRowCap {
+			break
 		}
 		result = append(result, model.DirIndexEntry{
 			Path:         path,

@@ -745,6 +745,9 @@ func printChildren(w io.Writer, view *service.IndexChildrenView) {
 	if view.Parent != nil {
 		fmt.Fprintf(w, "本目录空间：%s（%s）\n", formatSize(indexBytes(*view.Parent, view.SizeBasis)),
 			view.Parent.Accuracy.Label())
+		if view.Parent.InProgress {
+			fmt.Fprintln(w, "状态：进行中（当前任务尚未发布完整索引）")
+		}
 	}
 	if len(view.Dirs) == 0 {
 		fmt.Fprintln(w, "该目录没有索引子目录；可能尚未扫描、索引深度不足，或该目录为空。")

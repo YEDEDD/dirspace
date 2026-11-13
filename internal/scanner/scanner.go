@@ -1017,6 +1017,19 @@ func (s *Scanner) heartbeatLoop(ctx context.Context, run *model.Run, req Request
 				return
 			}
 		case <-progressTicker.C:
+			if sess.rollups != nil {
+				depth := s.config().Scan.IndexDepth
+				if depth < 1 {
+					depth = 3
+				}
+				if depth > 6 {
+					depth = 6
+				}
+				entries := sess.rollups.liveRows(depth, s.config().Scan.IndexTopK, time.Now())
+				if err := s.store.ReplaceRunLiveIndex(context.WithoutCancel(ctx), run.ID, entries); err != nil {
+					s.log.Warn("保存扫描中目录索引失败", "error", err.Error())
+				}
+			}
 			if live := sess.snapshotLive(); len(live) > 0 {
 				if err := s.store.SaveDirProgress(context.WithoutCancel(ctx), run.ID, live); err != nil {
 					s.log.Warn("保存扫描中目录进度失败", "error", err.Error())

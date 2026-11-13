@@ -86,3 +86,31 @@ func TestLiveDirectoryProgressIsNotCompleted(t *testing.T) {
 		t.Fatalf("live rows after completion = %+v", live)
 	}
 }
+
+func TestRunLiveIndexChildren(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(context.Background(), filepath.Join(dir, "test.db"), Options{BusyTimeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	run, err := store.StartRun(ctx, filepath.Join(dir, "root"), StartOptions{Mode: "full"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceRunLiveIndex(ctx, run.ID, []model.DirIndexEntry{
+		{Path: "top", ParentPath: "", Name: "top", Depth: 1, AllocBytes: 100, DataStatus: model.DataPartial, Accuracy: model.AccuracyExact},
+		{Path: "top/child", ParentPath: "top", Name: "child", Depth: 2, AllocBytes: 80, DataStatus: model.DataPartial, Accuracy: model.AccuracyExact},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := store.GetLiveIndexEntry(ctx, run.ID, "top")
+	if err != nil || parent.AllocBytes != 100 {
+		t.Fatalf("parent=%+v err=%v", parent, err)
+	}
+	children, err := store.LiveChildren(ctx, run.ID, "top", 0, model.BasisAllocated)
+	if err != nil || len(children) != 1 || children[0].Path != "top/child" {
+		t.Fatalf("children=%+v err=%v", children, err)
+	}
+}

@@ -294,12 +294,16 @@ func (s *Service) Children(ctx context.Context, path string, limit int) (*IndexC
 			return nil, &NotScannedError{Path: requested}
 		}
 	}
+	active, _ := s.Store.ActiveRun(ctx, root.ID)
 	var parent *model.DirIndexEntry
 	if rel != "" {
 		entry, getErr := s.Store.GetIndexEntry(ctx, root.ID, rel)
+		if errors.Is(getErr, storage.ErrNotFound) && active != nil {
+			entry, getErr = s.Store.GetLiveIndexEntry(ctx, active.ID, rel)
+		}
 		if getErr != nil {
 			if errors.Is(getErr, storage.ErrNotFound) {
-				return nil, fmt.Errorf("目录 %s 尚未进入索引；请提高 scan.index_depth 后重新扫描，或对其所属的一级目录执行 dirspace rebuild", requested)
+				return nil, fmt.Errorf("目录 %s 尚未进入索引；当前任务只提供已完成的受限层级快照，扫描结束后才有完整索引，或提高 scan.index_depth 后重扫", requested)
 			}
 			return nil, getErr
 		}
@@ -309,56 +313,56 @@ func (s *Service) Children(ctx context.Context, path string, limit int) (*IndexC
 	if err != nil {
 		return nil, err
 	}
-	if run, runErr := s.Store.ActiveRun(ctx, root.ID); runErr == nil {
-		live, liveErr := s.Store.StagedProgressDirs(ctx, run.ID, s.sizeBasis())
-		if liveErr == nil && len(live) > 0 {
-			if rel == "" {
-				byPath := make(map[string]bool, len(dirs)+len(live))
-				for _, d := range dirs {
-					byPath[d.Path] = true
-				}
-				for _, d := range live {
-					if byPath[d.Name] {
-						continue
-					}
-					dirs = append(dirs, model.DirIndexEntry{
-						Path: d.Name, ParentPath: "", Name: d.Name, Depth: 1,
-						AllocBytes: d.AllocBytes, LogicalBytes: d.LogicalBytes,
-						FileCount: d.FileCount, DirCount: d.DirCount,
-						SymlinkCount: d.SymlinkCount,
-						DataStatus:   model.DataPartial, Accuracy: model.AccuracyApproximate,
-						Truncated: d.Truncated, InProgress: true,
-					})
-				}
-			} else if parent == nil {
-				for _, d := range live {
-					if d.Name == rel {
-						parent = &model.DirIndexEntry{
-							Path: rel, ParentPath: "", Name: d.Name, Depth: 1,
-							AllocBytes: d.AllocBytes, LogicalBytes: d.LogicalBytes,
-							FileCount: d.FileCount, DirCount: d.DirCount,
-							SymlinkCount: d.SymlinkCount,
-							DataStatus:   model.DataPartial, Accuracy: model.AccuracyApproximate,
-							Truncated: d.Truncated, InProgress: true,
-						}
-						break
-					}
-				}
+	if active != nil {
+		live, liveErr := s.Store.StagedProgressDirs(ctx, active.ID, s.sizeBasis())
+		if liveErr == nil && len(live) > 0 && rel == "" {
+			byPath := make(map[string]bool, len(dirs)+len(live))
+			for _, d := range dirs {
+				byPath[d.Path] = true
 			}
-			sort.SliceStable(dirs, func(i, j int) bool {
-				left, right := dirs[i].AllocBytes, dirs[j].AllocBytes
-				if s.sizeBasis() == model.BasisLogical {
-					left, right = dirs[i].LogicalBytes, dirs[j].LogicalBytes
+			for _, d := range live {
+				if byPath[d.Name] {
+					continue
 				}
-				if left != right {
-					return left > right
-				}
-				return dirs[i].Path < dirs[j].Path
-			})
-			if limit > 0 && len(dirs) > limit {
-				dirs = dirs[:limit]
+				dirs = append(dirs, model.DirIndexEntry{
+					Path: d.Name, ParentPath: "", Name: d.Name, Depth: 1,
+					AllocBytes: d.AllocBytes, LogicalBytes: d.LogicalBytes,
+					FileCount: d.FileCount, DirCount: d.DirCount,
+					SymlinkCount: d.SymlinkCount,
+					DataStatus:   model.DataPartial, Accuracy: model.AccuracyApproximate,
+					Truncated: d.Truncated, InProgress: true,
+				})
 			}
 		}
+		liveChildren, liveErr := s.Store.LiveChildren(ctx, active.ID, rel, limit, s.sizeBasis())
+		if liveErr == nil && len(liveChildren) > 0 {
+			byPath := make(map[string]int, len(dirs))
+			for i := range dirs {
+				byPath[dirs[i].Path] = i
+			}
+			for i := range liveChildren {
+				e := liveChildren[i]
+				e.RootID = root.ID
+				if idx, ok := byPath[e.Path]; ok {
+					dirs[idx] = e
+				} else {
+					dirs = append(dirs, e)
+				}
+			}
+		}
+	}
+	sort.SliceStable(dirs, func(i, j int) bool {
+		left, right := dirs[i].AllocBytes, dirs[j].AllocBytes
+		if s.sizeBasis() == model.BasisLogical {
+			left, right = dirs[i].LogicalBytes, dirs[j].LogicalBytes
+		}
+		if left != right {
+			return left > right
+		}
+		return dirs[i].Path < dirs[j].Path
+	})
+	if limit > 0 && len(dirs) > limit {
+		dirs = dirs[:limit]
 	}
 	return &IndexChildrenView{
 		Path: requested, ScanRoot: root.Path, Parent: parent,

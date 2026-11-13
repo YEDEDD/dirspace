@@ -140,11 +140,11 @@ func (s *Store) initialize(ctx context.Context) error {
 		var tables int
 		if err := s.wdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master
 			WHERE type='table' AND name IN
-			('roots','scan_runs','run_dirs','top_dirs','dir_index','dir_history','hardlink_seen','control','inventory')`).
+			('roots','scan_runs','run_dirs','top_dirs','dir_index','run_live_dirs','dir_history','hardlink_seen','control','inventory')`).
 			Scan(&tables); err != nil {
 			return fmt.Errorf("检查数据库结构失败: %w", err)
 		}
-		if tables == 9 {
+		if tables == 10 {
 			return nil
 		}
 	}
@@ -1870,6 +1870,107 @@ func (s *Store) GetIndexEntry(ctx context.Context, rootID int64, path string) (*
 		return nil, ErrNotFound
 	}
 	return e, err
+}
+
+// ReplaceRunLiveIndex stores a bounded, unpublished view of completed
+// subdirectories for the currently running scan. It is replaced periodically and
+// deleted when the run finishes.
+func (s *Store) ReplaceRunLiveIndex(ctx context.Context, runID int64, entries []model.DirIndexEntry) error {
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM run_live_dirs WHERE run_id=?`, runID); err != nil {
+			return err
+		}
+		const batchSize = 200
+		for start := 0; start < len(entries); start += batchSize {
+			end := start + batchSize
+			if end > len(entries) {
+				end = len(entries)
+			}
+			var query strings.Builder
+			query.WriteString(`INSERT INTO run_live_dirs
+				(run_id, path, parent_path, name, depth, alloc_bytes, logical_bytes,
+				 file_count, dir_count, symlink_count, data_status, accuracy, truncated, updated_at)
+				VALUES `)
+			args := make([]any, 0, (end-start)*14)
+			for i, e := range entries[start:end] {
+				if i > 0 {
+					query.WriteByte(',')
+				}
+				query.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+				truncated := 0
+				if e.Truncated {
+					truncated = 1
+				}
+				args = append(args, runID, e.Path, e.ParentPath, e.Name, e.Depth,
+					e.AllocBytes, e.LogicalBytes, e.FileCount, e.DirCount, e.SymlinkCount,
+					string(e.DataStatus), string(e.Accuracy), truncated, toMillis(e.UpdatedAt))
+			}
+			if _, err := tx.ExecContext(ctx, query.String(), args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// LiveChildren returns completed subdirectories from the active run snapshot.
+func (s *Store) LiveChildren(ctx context.Context, runID int64, parentPath string, limit int, basis model.SizeBasis) ([]model.DirIndexEntry, error) {
+	orderBy := "alloc_bytes"
+	if basis == model.BasisLogical {
+		orderBy = "logical_bytes"
+	}
+	query := `SELECT path, parent_path, name, depth, alloc_bytes, logical_bytes,
+		file_count, dir_count, symlink_count, data_status, accuracy, truncated, updated_at
+		FROM run_live_dirs WHERE run_id=? AND parent_path=?
+		ORDER BY ` + orderBy + ` DESC, name ASC`
+	args := []any{runID, parentPath}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []model.DirIndexEntry
+	for rows.Next() {
+		e, err := scanLiveIndex(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *e)
+	}
+	return result, rows.Err()
+}
+
+// GetLiveIndexEntry returns one path from the active run snapshot.
+func (s *Store) GetLiveIndexEntry(ctx context.Context, runID int64, path string) (*model.DirIndexEntry, error) {
+	e, err := scanLiveIndex(s.rdb.QueryRowContext(ctx, `SELECT path, parent_path, name, depth,
+		alloc_bytes, logical_bytes, file_count, dir_count, symlink_count,
+		data_status, accuracy, truncated, updated_at
+		FROM run_live_dirs WHERE run_id=? AND path=?`, runID, path))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return e, err
+}
+
+func scanLiveIndex(row interface{ Scan(...any) error }) (*model.DirIndexEntry, error) {
+	var e model.DirIndexEntry
+	var dataStatus, accuracy string
+	var truncated int
+	var updated int64
+	if err := row.Scan(&e.Path, &e.ParentPath, &e.Name, &e.Depth, &e.AllocBytes,
+		&e.LogicalBytes, &e.FileCount, &e.DirCount, &e.SymlinkCount,
+		&dataStatus, &accuracy, &truncated, &updated); err != nil {
+		return nil, err
+	}
+	e.DataStatus = model.DataStatus(dataStatus)
+	e.Accuracy = model.Accuracy(accuracy)
+	e.Truncated = truncated != 0
+	e.UpdatedAt = fromMillis(updated)
+	return &e, nil
 }
 
 // CountIndexedDirs returns the number of cached index entries for a root.

@@ -2,7 +2,7 @@ package storage
 
 // schemaVersion is bumped whenever an incompatible or additive migration is
 // required. The program refuses to open a database created by a newer version.
-const schemaVersion = 8
+const schemaVersion = 9
 
 var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS roots (
@@ -113,6 +113,25 @@ var schemaStatements = []string{
 		PRIMARY KEY(root_id, path)
 	) WITHOUT ROWID`,
 	`CREATE INDEX IF NOT EXISTS idx_dir_index_children ON dir_index(root_id, parent_path, alloc_bytes DESC, name ASC)`,
+
+	`CREATE TABLE IF NOT EXISTS run_live_dirs (
+		run_id INTEGER NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
+		path TEXT NOT NULL,
+		parent_path TEXT NOT NULL DEFAULT '',
+		name TEXT NOT NULL,
+		depth INTEGER NOT NULL,
+		alloc_bytes INTEGER NOT NULL DEFAULT 0,
+		logical_bytes INTEGER NOT NULL DEFAULT 0,
+		file_count INTEGER NOT NULL DEFAULT 0,
+		dir_count INTEGER NOT NULL DEFAULT 0,
+		symlink_count INTEGER NOT NULL DEFAULT 0,
+		data_status TEXT NOT NULL DEFAULT 'partial',
+		accuracy TEXT NOT NULL DEFAULT 'unknown',
+		truncated INTEGER NOT NULL DEFAULT 0,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY(run_id, path)
+	) WITHOUT ROWID`,
+	`CREATE INDEX IF NOT EXISTS idx_run_live_children ON run_live_dirs(run_id, parent_path, alloc_bytes DESC, name ASC)`,
 
 	`CREATE TABLE IF NOT EXISTS dir_history (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,

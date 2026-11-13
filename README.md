@@ -9,8 +9,8 @@ GitHub: <https://github.com/YEDEDD/dirspace>
 需要 Go 1.27+，也可以直接用 Release 中的 Linux 压缩包。
 
 ```bash
-tar xzf dirspace-1.15.0-linux-amd64.tar.gz
-cd dirspace-1.15.0-linux-amd64
+tar xzf dirspace-1.15.1-linux-amd64.tar.gz
+cd dirspace-1.15.1-linux-amd64
 sudo ./scripts/install.sh
 ```
 
@@ -136,7 +136,7 @@ profile 基线：
 | `dirspace config explain` | 最终生效配置和自动推导值 |
 | `dirspace daemon` | 常驻调度 quick + exact |
 
-`partial` 在扫描中会列出正在扫描的一级目录，显示它们**截至目前**的空间、文件数和子目录数，并标记 `进行中`；已完成目录和从上次沿用的目录分别汇总。顶部同时显示 `df` 风格的文件系统总量、已用和可用容量。进行中数值每 10 秒左右刷新，下次再运行 `partial` 会继续更新到最新值。`children --path <扫描根>` 也会把进行中的一级目录合并进来；更深层的实时子目录索引暂不写入。
+`partial` 在扫描中会列出正在扫描的一级目录，显示它们**截至目前**的空间、文件数和子目录数，并标记 `进行中`；已完成目录和从上次沿用的目录分别汇总。顶部同时显示 `df` 风格的文件系统总量、已用和可用容量。进行中数值每 10 秒左右刷新，下次再运行 `partial` 会继续更新到最新值。`children` 会读取当前任务按 `index_depth`/`index_top_k` 生成的受限实时快照（最多 6 层、最多 10 万行），所以扫描过程中也能下钻已完成的子目录；完整索引仍在扫描结束时写入。
 
 `pause`、`resume`、`cancel`、`refresh`、`rebuild`、`cleanup`、`backup`、`doctor` 等完整命令见 `dirspace --help`。常用参数：`--path`、`--config`、`--db`、`--json`、`--logical`、`--foreground`、`--background`；`diff` 另有 `--since`。
 
