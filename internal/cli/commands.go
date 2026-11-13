@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.15.5"
+var Version = "1.15.6"
 
 const (
 	exitOK      = 0
@@ -849,7 +849,7 @@ func printHelp(w io.Writer) {
   list                显示全部一级目录
   children [N]        显示目录索引中某个目录的直接子目录（--path 指定；N 可选）
   diff                对比最近两次同模式完成快照（--since 7d）
-  size                查询一个目录的已缓存大小；--exact 未命中时精扫该目录
+  size                查询一个目录的已缓存大小；--exact 强制精扫该目录
   fs-usage            查询整个挂载点的容量、已用和可用空间（statfs）
   merge               合并多个分片数据库（--db 目标库，--inputs 分片列表）
   partial             显示本轮已完成目录，未完成的沿用上次结果（--staging-only 只看本轮）
@@ -880,7 +880,7 @@ func printHelp(w io.Writer) {
   --new                   只扫描新增或失效的一级目录（scan，需要已有基线）
   --resume                断点续扫（scan）
   --staging-only          只显示本轮 staging，不与上次结果合并（partial）
-  --exact                 未命中缓存时精确扫描目标目录作为独立根（size）
+  --exact                 强制精确扫描目标目录作为独立根（size）
   --foreground            长任务在前台运行，不自动转后台
   --background            强制长任务转后台（脚本可用）
   --shard INDEX/COUNT     只扫描目标子树的一部分，结果需 merge（scan/refresh）

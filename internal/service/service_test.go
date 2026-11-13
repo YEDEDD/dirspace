@@ -821,3 +821,30 @@ func TestDiffComparesCompletedSnapshots(t *testing.T) {
 		t.Fatalf("growth not detected: %+v", view.Rows[0])
 	}
 }
+
+func TestSizeExactForcesRescanOfIndexedPath(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	target := filepath.Join(root, "alpha")
+	mkFile(t, filepath.Join(target, "data.bin"), 4096)
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	cached, err := f.svc.Size(context.Background(), target, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached.Scanned || cached.Entry == nil {
+		t.Fatalf("cached size: %+v", cached)
+	}
+
+	mkFile(t, filepath.Join(target, "extra.bin"), 8192)
+	fresh, err := f.svc.Size(context.Background(), target, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fresh.Scanned || fresh.Root.Path != target || fresh.Root.TotalAlloc < 8192 {
+		t.Fatalf("exact refresh: %+v", fresh)
+	}
+}

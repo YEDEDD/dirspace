@@ -510,16 +510,21 @@ func (s *Service) Size(ctx context.Context, path string, exact bool) (*SizeView,
 		if rel != "" && !strings.HasPrefix(rel, "../") {
 			entry, entryErr := s.Store.GetIndexEntry(ctx, root.ID, rel)
 			if entryErr == nil {
-				return &SizeView{Path: requested, Root: *root, Entry: entry, SizeBasis: s.sizeBasis()}, nil
-			}
-			if !errors.Is(entryErr, storage.ErrNotFound) {
+				if !exact {
+					return &SizeView{Path: requested, Root: *root, Entry: entry, SizeBasis: s.sizeBasis()}, nil
+				}
+				// --exact means "give me the current size", not "use the
+				// cached size if it exists". Fall through and rescan the
+				// requested subtree as its own root.
+			} else if !errors.Is(entryErr, storage.ErrNotFound) {
 				return nil, entryErr
-			}
-			if !exact {
+			} else if !exact {
 				return nil, fmt.Errorf("目录 %s 尚未进入索引；可使用 dirspace size --path %s --exact 单独扫描该目录，或开启 scan.index_all_dirs 并重新扫描所属根", requested, requested)
 			}
 		} else if rel == "" {
-			return &SizeView{Path: requested, Root: *root, SizeBasis: s.sizeBasis()}, nil
+			if !exact {
+				return &SizeView{Path: requested, Root: *root, SizeBasis: s.sizeBasis()}, nil
+			}
 		}
 	} else if rootErr != nil {
 		var notScanned *NotScannedError
