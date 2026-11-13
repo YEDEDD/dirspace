@@ -334,7 +334,14 @@ func (s *Service) Children(ctx context.Context, path string, limit int) (*IndexC
 				})
 			}
 		}
-		liveChildren, liveErr := s.Store.LiveChildren(ctx, active.ID, rel, limit, s.sizeBasis())
+		// The live index rows for the root itself describe completed
+		// subdirectories; the root's first-level aggregate is still being
+		// scanned, so keep the StagedProgressDirs row (InProgress=true) for
+		// rel=="" instead of overriding it with a completed-looking row.
+		var liveChildren []model.DirIndexEntry
+		if rel != "" {
+			liveChildren, liveErr = s.Store.LiveChildren(ctx, active.ID, rel, limit, s.sizeBasis())
+		}
 		if liveErr == nil && len(liveChildren) > 0 {
 			byPath := make(map[string]int, len(dirs))
 			for i := range dirs {

@@ -9,8 +9,8 @@ GitHub: <https://github.com/YEDEDD/dirspace>
 需要 Go 1.27+，也可以直接用 Release 中的 Linux 压缩包。
 
 ```bash
-tar xzf dirspace-1.15.3-linux-amd64.tar.gz
-cd dirspace-1.15.3-linux-amd64
+tar xzf dirspace-1.15.4-linux-amd64.tar.gz
+cd dirspace-1.15.4-linux-amd64
 sudo ./scripts/install.sh
 ```
 

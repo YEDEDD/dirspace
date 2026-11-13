@@ -528,6 +528,21 @@ func TestPartialIncludesLiveAndFilesystemTotals(t *testing.T) {
 	if view.FSUsage == nil || view.FSUsage.Total == 0 {
 		t.Fatalf("missing filesystem usage: %+v", view.FSUsage)
 	}
+	// A completed live-index row must not hide the fact that the first-level
+	// directory itself is still being scanned.
+	if err := f.store.ReplaceRunLiveIndex(context.Background(), run.ID, []model.DirIndexEntry{
+		{Path: "alpha", ParentPath: "", Name: "alpha", Depth: 1, AllocBytes: 3 << 20,
+			DataStatus: model.DataPartial, Accuracy: model.AccuracyExact},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	children, err := f.svc.Children(context.Background(), root, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children.Dirs) != 1 || !children.Dirs[0].InProgress {
+		t.Fatalf("root live child lost in-progress state: %+v", children.Dirs)
+	}
 }
 
 func TestPartialMergesCurrentWithLastPublished(t *testing.T) {
