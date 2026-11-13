@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.9.4"
+var Version = "1.10.0"
 
 const (
 	exitOK      = 0
@@ -682,6 +682,8 @@ func buildConfigJSON(cfg *config.Config) map[string]any {
 		"interval":             formatInterval(cfg.Scan.Interval.Duration),
 		"quick_interval":       formatInterval(cfg.Scan.QuickInterval.Duration),
 		"quick_sample_percent": cfg.Scan.QuickSamplePercent,
+		"quick_census_files":   cfg.Scan.QuickCensusFiles,
+		"read_batch_size":      cfg.Scan.ReadBatchSize,
 		"index_depth":          cfg.Scan.IndexDepth,
 		"index_top_k":          cfg.Scan.IndexTopK,
 		"index_all_dirs":       cfg.Scan.IndexAllDirs,

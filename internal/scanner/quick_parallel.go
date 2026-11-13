@@ -90,9 +90,24 @@ func (s *Scanner) scanQuickTree(ctx context.Context, sess *scanSession, root str
 				if !ok {
 					return
 				}
+				if err := sess.acquireSlot(ctx); err != nil {
+					q.done()
+					return
+				}
 				sess.counters.startWorker()
-				taskAgg, err := s.processQuickDirTask(ctx, sess, q, task, budget)
+				var taskAgg treeAggregate
+				var err error
+				if task.quick != nil {
+					taskAgg, err = s.processQuickFileTask(ctx, sess, q, task.quick)
+				} else {
+					taskAgg, err = s.processQuickDirTask(ctx, sess, q, task, budget, func(a treeAggregate) {
+						mu.Lock()
+						agg.add(a)
+						mu.Unlock()
+					})
+				}
 				sess.counters.finishWorker()
+				sess.releaseSlot()
 				mu.Lock()
 				agg.add(taskAgg)
 				mu.Unlock()
@@ -127,53 +142,279 @@ func (s *Scanner) scanQuickTree(ctx context.Context, sess *scanSession, root str
 
 // processQuickDirTask counts every entry in one directory and samples file
 // metadata. Child directories are pushed back to the shared queue.
-func (s *Scanner) processQuickDirTask(ctx context.Context, sess *scanSession, q *treeQueue, task treeTask, budget *quickBudget) (treeAggregate, error) {
-	var agg treeAggregate
-	if budget.exceeded() {
-		return agg, errQuickBudget
+type quickFileItem struct {
+	path string
+	prob float64
+}
+
+type quickFileTask struct {
+	state *quickDirState
+	items []quickFileItem
+}
+
+// quickDirState owns the per-directory counters and sampled byte totals. File
+// batches run in parallel, but the directory is only finalized after every
+// batch has returned. Until then the tree queue keeps the directory task open.
+type quickDirState struct {
+	path  string
+	depth int
+
+	mu        sync.Mutex
+	alloc     int64
+	logical   int64
+	sealed    bool
+	pending   int
+	finalized bool
+	firstFile string
+	firstSet  atomic.Bool
+
+	fileCount     atomic.Int64
+	dirCount      atomic.Int64
+	symlinkCount  atomic.Int64
+	transientErrs atomic.Int64
+	fileSeen      atomic.Int64
+
+	sampledFiles    int
+	allocWeighted   float64
+	logicalWeighted float64
+	truncated       bool
+
+	add func(treeAggregate)
+}
+
+func (st *quickDirState) countFile() int64 {
+	st.fileCount.Add(1)
+	return st.fileSeen.Add(1)
+}
+
+func (st *quickDirState) setFirstFile(path string) {
+	if !st.firstSet.CompareAndSwap(false, true) {
+		return
 	}
-	if sess.quickSlots != nil {
-		select {
-		case sess.quickSlots <- struct{}{}:
-			defer func() { <-sess.quickSlots }()
-		case <-ctx.Done():
-			return agg, ctx.Err()
+	st.mu.Lock()
+	st.firstFile = path
+	st.mu.Unlock()
+}
+
+func (st *quickDirState) addDir() {
+	st.dirCount.Add(1)
+}
+
+func (st *quickDirState) addSymlink() {
+	st.symlinkCount.Add(1)
+}
+
+func (st *quickDirState) addTransient() {
+	st.transientErrs.Add(1)
+}
+
+func (st *quickDirState) addDirBlock(meta platform.FileMeta) {
+	st.mu.Lock()
+	st.alloc += meta.Allocated
+	st.logical += meta.Logical
+	st.mu.Unlock()
+}
+
+func (st *quickDirState) demoteToDir() {
+	st.fileCount.Add(-1)
+	st.dirCount.Add(1)
+	st.fileSeen.Add(-1)
+}
+
+func (st *quickDirState) demoteToSymlink() {
+	st.fileCount.Add(-1)
+	st.symlinkCount.Add(1)
+	st.fileSeen.Add(-1)
+}
+
+func (st *quickDirState) demoteToOther() {
+	st.fileCount.Add(-1)
+	st.fileSeen.Add(-1)
+}
+
+func (st *quickDirState) markTruncated() {
+	st.mu.Lock()
+	st.truncated = true
+	st.mu.Unlock()
+}
+
+func (st *quickDirState) recordSample(meta platform.FileMeta, prob float64) {
+	st.mu.Lock()
+	st.sampledFiles++
+	if prob > 0 {
+		st.allocWeighted += float64(meta.Allocated) / prob
+		st.logicalWeighted += float64(meta.Logical) / prob
+	}
+	st.mu.Unlock()
+}
+
+func (st *quickDirState) queueBatch(q *treeQueue, items []quickFileItem) {
+	if len(items) == 0 {
+		return
+	}
+	batch := append([]quickFileItem(nil), items...)
+	st.mu.Lock()
+	st.pending++
+	st.mu.Unlock()
+	q.push(treeTask{path: st.path, depth: st.depth, quick: &quickFileTask{state: st, items: batch}})
+}
+
+func (st *quickDirState) seal(ctx context.Context, sess *scanSession) {
+	st.mu.Lock()
+	st.sealed = true
+	st.mu.Unlock()
+	st.finalize(ctx, sess)
+}
+
+func (st *quickDirState) done(ctx context.Context, sess *scanSession) {
+	st.mu.Lock()
+	if st.pending > 0 {
+		st.pending--
+	}
+	st.mu.Unlock()
+	st.finalize(ctx, sess)
+}
+
+func (st *quickDirState) finalize(ctx context.Context, sess *scanSession) {
+	st.mu.Lock()
+	if !st.sealed || st.pending != 0 || st.finalized {
+		st.mu.Unlock()
+		return
+	}
+	st.finalized = true
+	agg := treeAggregate{
+		allocBytes:    st.alloc,
+		logicalBytes:  st.logical,
+		fileCount:     st.fileCount.Load(),
+		dirCount:      st.dirCount.Load(),
+		symlinkCount:  st.symlinkCount.Load(),
+		transientErrs: st.transientErrs.Load(),
+	}
+	sampled := st.sampledFiles
+	allocWeighted := st.allocWeighted
+	logicalWeighted := st.logicalWeighted
+	fileSeen := st.fileSeen.Load()
+	firstFile := st.firstFile
+	truncated := st.truncated
+	add := st.add
+	st.mu.Unlock()
+
+	if sampled == 0 && fileSeen > 0 && firstFile != "" && ctx.Err() == nil {
+		if err := sess.wait(ctx); err == nil {
+			infoStart := time.Now()
+			fi, infoErr := os.Lstat(firstFile)
+			sess.controller.ObserveMetadata(time.Since(infoStart), infoErr)
+			if infoErr == nil && fi.Mode().IsRegular() {
+				meta, exact := platform.Stat(fi)
+				if !exact {
+					meta.Nlink = 1
+					agg.transientErrs++
+				}
+				agg.allocBytes += meta.Allocated * fileSeen
+				agg.logicalBytes += meta.Logical * fileSeen
+			}
 		}
+	} else {
+		agg.allocBytes += int64(allocWeighted + 0.5)
+		agg.logicalBytes += int64(logicalWeighted + 0.5)
+	}
+	sess.counters.alloc.Add(agg.allocBytes)
+	sess.counters.logical.Add(agg.logicalBytes)
+	sess.rollups.addDirect(st.path, agg, truncated)
+	if add != nil {
+		add(agg)
+	}
+}
+
+// processQuickFileTask handles one parallel batch of sampled files. Unknown
+// entry types are classified here; if one turns out to be a directory it is
+// put back on the shared queue.
+func (s *Scanner) processQuickFileTask(ctx context.Context, sess *scanSession, q *treeQueue, task *quickFileTask) (treeAggregate, error) {
+	defer task.state.done(ctx, sess)
+	for _, item := range task.items {
+		if err := sess.wait(ctx); err != nil {
+			return treeAggregate{}, err
+		}
+		infoStart := time.Now()
+		info, err := os.Lstat(item.path)
+		sess.controller.ObserveMetadata(time.Since(infoStart), err)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				task.state.addTransient()
+				continue
+			}
+			return treeAggregate{}, fmt.Errorf("读取文件元数据失败 %s: %w", item.path, err)
+		}
+		mode := info.Mode()
+		if mode.IsDir() {
+			task.state.demoteToDir()
+			sess.counters.files.Add(-1)
+			if task.state.depth+1 > maxDepth {
+				return treeAggregate{}, fmt.Errorf("目录层级超过 %d: %s", maxDepth, item.path)
+			}
+			q.push(treeTask{path: item.path, depth: task.state.depth + 1})
+			continue
+		}
+		if mode&os.ModeSymlink != 0 {
+			task.state.demoteToSymlink()
+			sess.counters.files.Add(-1)
+			continue
+		}
+		if !mode.IsRegular() {
+			task.state.demoteToOther()
+			sess.counters.files.Add(-1)
+			continue
+		}
+		meta, exact := platform.Stat(info)
+		if !exact {
+			meta.Nlink = 1
+			task.state.addTransient()
+		}
+		task.state.recordSample(meta, item.prob)
+	}
+	return treeAggregate{}, nil
+}
+
+// processQuickDirTask enumerates one directory, queues sampled files as small
+// parallel batches, and finalizes the directory once all batches finish. The
+// directory itself is still one queue task, so file batching does not change
+// which paths are visited.
+func (s *Scanner) processQuickDirTask(ctx context.Context, sess *scanSession, q *treeQueue, task treeTask, budget *quickBudget, add func(treeAggregate)) (treeAggregate, error) {
+	state := &quickDirState{path: task.path, depth: task.depth, add: add}
+	if budget.exceeded() {
+		return treeAggregate{}, errQuickBudget
 	}
 	if task.depth > maxDepth {
-		return agg, fmt.Errorf("目录层级超过 %d: %s", maxDepth, task.path)
+		return treeAggregate{}, fmt.Errorf("目录层级超过 %d: %s", maxDepth, task.path)
 	}
 	if err := sess.wait(ctx); err != nil {
-		return agg, err
+		return treeAggregate{}, err
 	}
 	openStart := time.Now()
 	f, err := platform.OpenDir(task.path)
 	sess.controller.ObserveMetadata(time.Since(openStart), err)
 	if err != nil {
 		if task.depth > 0 && errors.Is(err, os.ErrNotExist) {
-			agg.transientErrs++
-			sess.rollups.addDirect(task.path, agg, budget.truncated.Load())
-			return agg, nil
+			state.addTransient()
+			state.seal(ctx, sess)
+			return treeAggregate{}, nil
 		}
-		return agg, fmt.Errorf("打开目录失败 %s: %w", task.path, err)
+		return treeAggregate{}, fmt.Errorf("打开目录失败 %s: %w", task.path, err)
 	}
 	defer f.Close()
 
 	if err := sess.wait(ctx); err != nil {
-		return agg, err
+		return treeAggregate{}, err
 	}
 	statStart := time.Now()
 	info, statErr := f.Stat()
 	sess.controller.ObserveMetadata(time.Since(statStart), statErr)
 	if statErr != nil {
-		agg.transientErrs++
+		state.addTransient()
 	} else if meta, ok := platform.Stat(info); ok {
-		agg.allocBytes += meta.Allocated
-		agg.logicalBytes += meta.Logical
-		sess.counters.alloc.Add(meta.Allocated)
-		sess.counters.logical.Add(meta.Logical)
+		state.addDirBlock(meta)
 	} else {
-		agg.transientErrs++
+		state.addTransient()
 	}
 
 	percent := sess.quickSamplePercent
@@ -183,42 +424,48 @@ func (s *Scanner) processQuickDirTask(ctx context.Context, sess *scanSession, q 
 	if percent > 100 {
 		percent = 100
 	}
-	fileSeen := 0
-	sampledFiles := 0
-	var sampledAllocWeighted, sampledLogicalWeighted float64
-	var fallbackAlloc, fallbackLogical int64
-	var firstFile string
-	budgetHit := false
 	sampleProb := float64(percent) / 100
+	var fileSeen int64
+	batching := sess.quickMaxFiles <= 0
+	var batch []quickFileItem
+	budgetHit := false
+
+	flushBatch := func() {
+		if len(batch) == 0 {
+			return
+		}
+		state.queueBatch(q, batch)
+		batch = nil
+	}
 
 readLoop:
 	for {
 		if err := sess.wait(ctx); err != nil {
-			return agg, err
+			return treeAggregate{}, err
 		}
 		readStart := time.Now()
-		entries, readErr := f.ReadDir(readBatchSize)
+		entries, readErr := f.ReadDir(sess.batchSize())
 		sess.controller.ObserveMetadata(time.Since(readStart), readErr)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			if task.depth > 0 && errors.Is(readErr, os.ErrNotExist) {
-				agg.transientErrs++
-				sess.rollups.addDirect(task.path, agg, budget.truncated.Load())
-				return agg, nil
+				state.addTransient()
+				state.seal(ctx, sess)
+				return treeAggregate{}, nil
 			}
-			return agg, fmt.Errorf("读取目录失败 %s: %w", task.path, readErr)
+			return treeAggregate{}, fmt.Errorf("读取目录失败 %s: %w", task.path, readErr)
 		}
 		for _, entry := range entries {
 			name := entry.Name()
 			path := filepath.Join(task.path, name)
 			typ := entry.Type()
 			if typ&os.ModeSymlink != 0 {
-				agg.symlinkCount++
+				state.addSymlink()
 				continue
 			}
 			if typ.IsDir() {
-				agg.dirCount++
+				state.addDir()
 				if task.depth+1 > maxDepth {
-					return agg, fmt.Errorf("目录层级超过 %d: %s", maxDepth, path)
+					return treeAggregate{}, fmt.Errorf("目录层级超过 %d: %s", maxDepth, path)
 				}
 				q.push(treeTask{path: path, depth: task.depth + 1})
 				continue
@@ -227,141 +474,85 @@ readLoop:
 				continue
 			}
 
-			fileSeen++
-			if fileSeen == 1 {
-				firstFile = path
-			}
-			agg.fileCount++
+			fileSeen = state.countFile()
 			sess.counters.files.Add(1)
+			state.setFirstFile(path)
 			if budget.add(1) {
+				state.markTruncated()
 				budgetHit = true
 				break readLoop
 			}
 
-			census := fileSeen <= quickCensusFiles
+			census := fileSeen <= int64(sess.censusFiles())
 			sample := census || quickSampled(path, sess.quickSalt, percent)
-			forcedCensus := false
-			var fileInfo os.FileInfo
-			var infoErr error
-			if typ == 0 {
-				classify := sample || len(entries) <= 32
-				if !classify {
-					continue
-				}
-				if err := sess.wait(ctx); err != nil {
-					return agg, err
-				}
-				infoStart := time.Now()
-				fileInfo, infoErr = entry.Info()
-				sess.controller.ObserveMetadata(time.Since(infoStart), infoErr)
-				if infoErr == nil && fileInfo.IsDir() {
-					agg.dirCount++
-					if task.depth+1 > maxDepth {
-						return agg, fmt.Errorf("目录层级超过 %d: %s", maxDepth, path)
-					}
-					q.push(treeTask{path: path, depth: task.depth + 1})
-					agg.fileCount--
-					sess.counters.files.Add(-1)
-					fileSeen--
-					continue
-				}
-				if infoErr == nil && fileInfo.Mode()&os.ModeSymlink != 0 {
-					agg.symlinkCount++
-					agg.fileCount--
-					sess.counters.files.Add(-1)
-					fileSeen--
-					continue
-				}
-				if infoErr == nil && !fileInfo.Mode().IsRegular() {
-					agg.fileCount--
-					sess.counters.files.Add(-1)
-					fileSeen--
-					continue
-				}
-				if infoErr != nil {
-					if errors.Is(infoErr, os.ErrNotExist) {
-						agg.transientErrs++
-						continue
-					}
-					return agg, fmt.Errorf("读取文件元数据失败 %s: %w", path, infoErr)
-				}
-				if !sample {
-					forcedCensus = true
-				}
-				sample = true
-			}
 			if !sample {
 				continue
 			}
-			if fileInfo == nil {
-				if err := sess.wait(ctx); err != nil {
-					return agg, err
-				}
-				infoStart := time.Now()
-				fileInfo, infoErr = os.Lstat(path)
-				sess.controller.ObserveMetadata(time.Since(infoStart), infoErr)
-				if infoErr != nil {
-					if errors.Is(infoErr, os.ErrNotExist) {
-						agg.transientErrs++
-						continue
-					}
-					return agg, fmt.Errorf("读取文件元数据失败 %s: %w", path, infoErr)
-				}
-			}
-			if !fileInfo.Mode().IsRegular() {
-				continue
-			}
-			meta, exact := platform.Stat(fileInfo)
-			if !exact {
-				meta.Nlink = 1
-				agg.transientErrs++
-			}
 			prob := sampleProb
-			if census || forcedCensus {
+			if census {
 				prob = 1
 			}
-			sampledFiles++
-			if prob > 0 {
-				sampledAllocWeighted += float64(meta.Allocated) / prob
-				sampledLogicalWeighted += float64(meta.Logical) / prob
+			item := quickFileItem{path: path, prob: prob}
+			if batching {
+				batch = append(batch, item)
+				if len(batch) >= 64 {
+					flushBatch()
+				}
+			} else if err := s.processQuickFileItem(ctx, sess, q, state, item); err != nil {
+				return treeAggregate{}, err
 			}
 		}
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
 	}
+	flushBatch()
+	state.seal(ctx, sess)
+	if budgetHit {
+		return treeAggregate{}, errQuickBudget
+	}
+	return treeAggregate{}, nil
+}
 
-	if sampledFiles == 0 && fileSeen > 0 && firstFile != "" {
-		if err := sess.wait(ctx); err != nil {
-			return agg, err
+func (s *Scanner) processQuickFileItem(ctx context.Context, sess *scanSession, q *treeQueue, state *quickDirState, item quickFileItem) error {
+	if err := sess.wait(ctx); err != nil {
+		return err
+	}
+	infoStart := time.Now()
+	info, err := os.Lstat(item.path)
+	sess.controller.ObserveMetadata(time.Since(infoStart), err)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			state.addTransient()
+			return nil
 		}
-		infoStart := time.Now()
-		fi, infoErr := os.Lstat(firstFile)
-		sess.controller.ObserveMetadata(time.Since(infoStart), infoErr)
-		if infoErr == nil && fi.Mode().IsRegular() {
-			meta, exact := platform.Stat(fi)
-			if !exact {
-				meta.Nlink = 1
-				agg.transientErrs++
-			}
-			fallbackAlloc = meta.Allocated * int64(fileSeen)
-			fallbackLogical = meta.Logical * int64(fileSeen)
+		return fmt.Errorf("读取文件元数据失败 %s: %w", item.path, err)
+	}
+	mode := info.Mode()
+	if mode.IsDir() {
+		state.demoteToDir()
+		sess.counters.files.Add(-1)
+		if state.depth+1 > maxDepth {
+			return fmt.Errorf("目录层级超过 %d: %s", maxDepth, item.path)
 		}
+		q.push(treeTask{path: item.path, depth: state.depth + 1})
+		return nil
 	}
-	allocEstimate := int64(sampledAllocWeighted + 0.5)
-	logicalEstimate := int64(sampledLogicalWeighted + 0.5)
-	if sampledFiles == 0 {
-		allocEstimate = fallbackAlloc
-		logicalEstimate = fallbackLogical
+	if mode&os.ModeSymlink != 0 {
+		state.demoteToSymlink()
+		sess.counters.files.Add(-1)
+		return nil
 	}
-	agg.allocBytes += allocEstimate
-	agg.logicalBytes += logicalEstimate
-	sess.counters.alloc.Add(allocEstimate)
-	sess.counters.logical.Add(logicalEstimate)
-	truncated := budget.truncated.Load() || budgetHit
-	sess.rollups.addDirect(task.path, agg, truncated)
-	if truncated {
-		return agg, errQuickBudget
+	if !mode.IsRegular() {
+		state.demoteToOther()
+		sess.counters.files.Add(-1)
+		return nil
 	}
-	return agg, nil
+	meta, exact := platform.Stat(info)
+	if !exact {
+		meta.Nlink = 1
+		state.addTransient()
+	}
+	state.recordSample(meta, item.prob)
+	return nil
 }

@@ -529,6 +529,52 @@ func TestQuickScanMarksSampledAndCountsFiles(t *testing.T) {
 	}
 }
 
+func TestQuickBatchedBytesMatchExact(t *testing.T) {
+	f := newScannerFixture(t)
+	f.cfg.Performance.Concurrency = config.Concurrency{Max: 4}
+	f.cfg.Scan.QuickSamplePercent = 100
+	f.cfg.Scan.QuickCensusFiles = 16
+	for d := 0; d < 3; d++ {
+		for i := 0; i < 120; i++ {
+			writeFile(t, filepath.Join(f.root, fmt.Sprintf("top%d", d), fmt.Sprintf("f%03d.bin", i)), 4096)
+		}
+	}
+	ctx := context.Background()
+	exact, err := f.scanner.Scan(ctx, Request{RootPath: f.root, Mode: model.ModeFull})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quick, err := f.scanner.Scan(ctx, Request{RootPath: f.root, Mode: model.ModeQuick})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quick.Accuracy != model.AccuracySampled {
+		t.Fatalf("accuracy=%s", quick.Accuracy)
+	}
+	if quick.FileCount != exact.FileCount || quick.TotalDirs != exact.TotalDirs {
+		t.Fatalf("quick counts=%+v exact=%+v", quick, exact)
+	}
+	if diff := quick.TotalAlloc - exact.TotalAlloc; diff < -64<<10 || diff > 64<<10 {
+		t.Fatalf("quick bytes=%d exact=%d diff=%d", quick.TotalAlloc, exact.TotalAlloc, diff)
+	}
+	root, err := f.store.GetRoot(ctx, f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := f.store.ListDirs(ctx, root.ID, 0, model.BasisAllocated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows=%d", len(rows))
+	}
+	for _, row := range rows {
+		if row.FileCount != 120 || row.AllocBytes < 120*4096 {
+			t.Fatalf("row=%+v", row)
+		}
+	}
+}
+
 func TestProgressActiveKeepsSlowWorkerVisible(t *testing.T) {
 	var counters progressCounters
 	counters.startCurrent("cae365-cae365-pvc")

@@ -48,6 +48,8 @@ scan:
   root_path: ` + filepath.Join(base, "data") + `
   interval: 45m
   size_basis: logical
+  read_batch_size: 2048
+  quick_census_files: 8
 performance:
   concurrency: 3
   max_metadata_qps: 25
@@ -76,6 +78,9 @@ logging:
 	}
 	if cfg.Database.RetentionDays != 12 {
 		t.Fatalf("retention=%d", cfg.Database.RetentionDays)
+	}
+	if cfg.Scan.QuickCensusFiles != 8 || cfg.Scan.ReadBatchSize != 2048 {
+		t.Fatalf("scan overrides: census=%d batch=%d", cfg.Scan.QuickCensusFiles, cfg.Scan.ReadBatchSize)
 	}
 }
 
@@ -181,11 +186,17 @@ func TestDefaultIntervalIsWeekly(t *testing.T) {
 	if got := Default().Scan.Interval.Duration; got != 168*time.Hour {
 		t.Fatalf("default interval=%v", got)
 	}
-	if got := Default().Scan.QuickInterval.Duration; got != 6*time.Hour {
+	if got := Default().Scan.QuickInterval.Duration; got != 24*time.Hour {
 		t.Fatalf("default quick interval=%v", got)
 	}
 	if got := Default().Scan.QuickSamplePercent; got != 2 {
 		t.Fatalf("default quick sample=%d", got)
+	}
+	if got := Default().Scan.QuickCensusFiles; got != 16 {
+		t.Fatalf("default quick census=%d", got)
+	}
+	if got := Default().Scan.ReadBatchSize; got != 1024 {
+		t.Fatalf("default read batch=%d", got)
 	}
 	if got := Default().Database.StaleRetentionDays; got != 7 {
 		t.Fatalf("default stale retention=%d", got)

@@ -14,10 +14,7 @@ import (
 	"github.com/YEDEDD/dirspace/internal/storage"
 )
 
-const (
-	readBatchSize = 256
-	maxDepth      = 512
-)
+const maxDepth = 512
 
 // scanTop recursively scans one first-level directory and returns its complete
 // aggregate. Only metadata is read; file contents are never opened.
@@ -93,7 +90,7 @@ func (s *Scanner) scanRootSelf(ctx context.Context, sess *scanSession) (out mode
 			return out, err
 		}
 		readStart := time.Now()
-		entries, readErr := f.ReadDir(readBatchSize)
+		entries, readErr := f.ReadDir(sess.batchSize())
 		sess.controller.ObserveMetadata(time.Since(readStart), readErr)
 		for _, entry := range entries {
 			if entry.IsDir() {

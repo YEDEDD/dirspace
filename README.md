@@ -10,8 +10,10 @@ GitHub: <https://github.com/YEDEDD/dirspace>
 - 一级目录聚合，直接回答“哪个目录占了多少空间”
 - 可配置深度的目录索引，支持 `children` 查询多级明细；只保留每层 top K，避免数据库膨胀
 - 本地 SQLite WAL 缓存，查询不访问共享存储
-- **精确全量**与**快速抽样估算**双模式：精确每周一次，快速默认每 6 小时一次
-- 递归目录树并行：一级目录、子目录、文件 `lstat` 共用工作队列；quick 也使用共享 worker 池，单个超大一级目录不再独占一个线程
+- **精确全量**与**快速抽样估算**双模式：精确每周一次，快速默认每 24 小时一次
+- 递归目录树并行：一级目录、子目录、文件 `lstat` 共用工作队列；exact 和 quick 都使用共享 worker 池，单个超大一级目录不再被一级目录数量分走 worker
+- quick 会把抽样文件的 `lstat` 按批交给多个 worker；超大扁平目录的元数据不再被一个目录任务串行处理
+- 可配置 `read_batch_size`（默认 1024）和 `quick_census_files`（默认 16），减少超大目录的 READDIR 和抽样元数据次数
 - `scan --new` 只扫新增或失效的一级目录，不重扫已有的
 - 已删除目录默认从排名中隐藏，并按 `stale_retention_days` 清理
 - 全局限速、CPU/内存保护、共享文件系统延迟自适应暂停
@@ -89,7 +91,7 @@ dirspace quick --path /mnt
 ```yaml
 scan:
   interval: 168h          # 精确全量：每周
-  quick_interval: 6h      # 快速估算：每 6 小时
+  quick_interval: 24h     # 快速估算：每 24 小时；大目录避免频繁积压
   quick_sample_percent: 2 # 抽 2% 文件
 ```
 
@@ -142,19 +144,18 @@ sudo systemctl enable --now dirspace-scan.timer
 最小配置：
 
 ```yaml
-profile: normal
+profile: fast
 
 scan:
   root_path: /mnt
-  interval: 168h
-  quick_interval: 6h
-  quick_sample_percent: 2
-  index_depth: 3
-  index_top_k: 20
-  index_all_dirs: false   # true 时保存每个目录的聚合大小
-  quick_max_files_per_top: 0  # 0 不限制；>0 时超大目录最多扫这么多文件
+  quick_interval: 24h
   require_mount_point: true
 ```
+
+其余参数使用程序默认值：`quick_sample_percent: 2`、`quick_census_files: 16`、
+`read_batch_size: 1024`、`index_depth: 3`、`index_top_k: 20`、
+`quick_max_files_per_top: 0`、自动内存上限和由 profile 决定的 QPS/并发。
+只有需要覆盖默认值时才写进配置文件。
 
 生产环境建议加 `require_mount_point: true`，避免挂载没就绪时误扫本地盘。`root_path` 可以是挂载点本身，也可以是挂载点下的子目录；判定要求路径位于一个**非根文件系统**的挂载点下，挂载失败回落到 `/` 时会被拒绝。
 
@@ -174,6 +175,8 @@ scan:
 - 索引不会增加 NFS 读取次数；扫描本来就会遍历这些目录
 - `index_depth` 只影响内存、数据库大小和可查询深度，不改变扫描范围
 - `index_all_dirs: true` 会保存每个目录的聚合大小，`size` 可以查询任意深层路径；目录多时数据库会变大，按需开启
+- `read_batch_size` 控制每次 `ReadDir` 请求的目录项数量，默认 1024；超大目录可适当加大，但会增加单次内存
+- `quick_census_files` 控制每个目录前多少个文件做完整统计，默认 16；降低它会减少 quick 元数据调用，但估算误差变大
 - `dirspace size --path <目录>` 只读缓存；`--exact` 在缓存未命中时把该目录作为独立根做一次精确扫描，不会重建整个上级根
 
 ### 分片扫描与合并
@@ -210,7 +213,8 @@ dirspace --db /var/lib/dirspace/merged.db children --path /mnt
 - 分片结果是 `partial`，合并前不要当完整根使用
 - 当前合并按分片求和，**跨分片硬链接尚未去重**；存在跨分片硬链接时不能宣称精确
 - 多客户端总 QPS 需要人工控制，建议每台客户端把 `max_metadata_qps` 设为总预算 / 分片数
-- 单个扁平目录仍然不能拆，分片只能拆一级/子树目录
+- 单个目录的 `READDIR` 仍然由一个 worker 完成；quick 的抽样 `lstat` 会并行，但目录枚举本身不能跨 worker 拆
+- 分片只能拆一级/子树目录，不能拆单个扁平目录
 
 如果某个一级目录特别大，可以设置：
 

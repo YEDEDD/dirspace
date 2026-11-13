@@ -5,12 +5,6 @@ import (
 	"hash/fnv"
 )
 
-// quickCensusFiles makes the first entries of every directory a census. Small
-// directories are therefore exact, while large directories still sample the
-// rest. The fixed prefix is compensated by weighting only the sampled tail, so
-// the estimate stays honest about what was actually counted.
-const quickCensusFiles = 32
-
 const quickHashBuckets = 10000
 
 // quickSampled is a deterministic, path-hashed sample. Hashing the path avoids

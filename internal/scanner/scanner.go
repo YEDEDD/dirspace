@@ -138,11 +138,13 @@ type scanSession struct {
 	counters           *progressCounters
 	control            *scanControl
 	intraWorkers       int
+	slots              chan struct{}
+	readBatchSize      int
 	quick              bool
 	quickSamplePercent int
+	quickCensusFiles   int
 	quickSalt          uint64
 	rollups            *rollupCollector
-	quickSlots         chan struct{}
 	quickMaxFiles      int64
 }
 
@@ -163,6 +165,42 @@ func fatal(err error) error {
 		return nil
 	}
 	return &fatalError{err: err}
+}
+
+// acquireSlot limits metadata work across every top-level tree. Each task owns
+// one slot for its whole lifetime; this keeps total NFS concurrency bounded
+// even when a tree has its own full worker pool.
+func (sess *scanSession) acquireSlot(ctx context.Context) error {
+	if sess.slots == nil {
+		return nil
+	}
+	select {
+	case sess.slots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (sess *scanSession) releaseSlot() {
+	if sess.slots == nil {
+		return
+	}
+	<-sess.slots
+}
+
+func (sess *scanSession) batchSize() int {
+	if sess.readBatchSize >= 32 {
+		return sess.readBatchSize
+	}
+	return 1024
+}
+
+func (sess *scanSession) censusFiles() int {
+	if sess.quickCensusFiles >= 0 {
+		return sess.quickCensusFiles
+	}
+	return 16
 }
 
 func (sess *scanSession) wait(ctx context.Context) error {
@@ -391,8 +429,10 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		inventory:          inv,
 		counters:           counters,
 		control:            control,
+		readBatchSize:      s.cfg.Scan.ReadBatchSize,
 		quick:              req.Mode == model.ModeQuick,
 		quickSamplePercent: s.cfg.Scan.QuickSamplePercent,
+		quickCensusFiles:   s.cfg.Scan.QuickCensusFiles,
 		quickSalt:          uint64(run.ID),
 		quickMaxFiles:      s.cfg.Scan.QuickMaxFilesPerTop,
 	}
@@ -449,20 +489,15 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		workerCount = 1
 	}
 	intraLimit := s.cfg.Performance.Concurrency.Limit()
-	intraWorkers := intraLimit / workerCount
-	if intraWorkers < 1 {
-		intraWorkers = 1
+	if intraLimit < 1 {
+		intraLimit = 1
 	}
-	if req.Mode == model.ModeQuick {
-		// Quick-mode top-level workers each get a full internal pool, but a
-		// shared semaphore caps total metadata concurrency. When only one big
-		// top-level directory remains, its pool can use all slots instead of
-		// being stuck at limit/topCount workers.
-		sess.intraWorkers = intraLimit
-		sess.quickSlots = make(chan struct{}, intraLimit)
-	} else {
-		sess.intraWorkers = intraWorkers
-	}
+	// Every top-level tree gets a full pool, while one shared semaphore caps
+	// aggregate metadata concurrency. Partitioning the limit by top-level count
+	// starves a single huge directory (for example map) once enough siblings
+	// exist to use all top-level workers.
+	sess.intraWorkers = intraLimit
+	sess.slots = make(chan struct{}, intraLimit)
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {

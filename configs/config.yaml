@@ -1,73 +1,10 @@
-# dirspace 最小配置
-#
-# 日常只需要关心三件事：扫哪里、多久扫一次、对业务影响多大。
-# 其余 QPS、CPU、内存、并发、NFS 阈值会根据 profile 自动推导。
-#
-# profile:
-#   low    生产优先，QPS 上限 100，最多 4 个 worker
-#   normal 默认，QPS 上限 300，最多 8 个 worker
-#   fast   维护窗口，QPS 上限 1000，最多 16 个 worker
-profile: normal
+# dirspace 最小配置：只保留与部署相关的少量自定义项。
+# QPS、并发、CPU/内存、NFS 延迟阈值和 quick 抽样参数都使用程序默认值。
+profile: fast
 
 scan:
   root_path: /mnt
-  # 精确全量：每周一次。全量扫描较慢，但结果准确。
-  interval: 168h
-  # 快速估算：每 6 小时一次，只抽样文件元数据，有误差但很快。
-  # 设为 0 可关闭快速估算。
-  quick_interval: 6h
-  # 快速模式抽样比例。2 表示约 2% 的文件；越大越准、越慢。
-  quick_sample_percent: 2
-  # 目录索引：缓存到三级，每层只保留 top20 子目录；0 关闭。
-  # 需要看四级、五级时改成 4 或 5；更深的未命中路径需要重扫。
-  index_depth: 3
-  index_top_k: 20
-  # 全目录索引：为每个目录保存一行聚合大小（1.3M 目录约几百 MB）。
-  # 开启后 size 命令可查询任意深层目录；默认关闭以控制数据库大小。
-  index_all_dirs: false
-  # quick 单个一级目录最多统计的文件数；0 表示不限制。
-  # 超出后该目录标记 partial，空间显示为下限，避免一个超大目录拖死整轮。
-  quick_max_files_per_top: 0
-  # 生产环境建议开启：挂载未就绪时拒绝扫描，避免误扫本地盘。
+  # 大目录一次 quick 可能超过一天，避免 6 小时一轮造成持续积压。
+  quick_interval: 24h
+  # 挂载未就绪时拒绝扫描，避免误扫本地盘。
   require_mount_point: true
-
-performance:
-  # 按 cgroup 上限自动推导；systemd 单元也使用百分比，不再写死 512M。
-  memory_limit: auto
-
-# 可选高级覆盖，通常不需要填写。填写后会覆盖 profile 中的同名值：
-#
-# database:
-#   path: /var/lib/dirspace/usage.db
-#   retention_days: 90
-#   stale_retention_days: 7     # 已删除目录的缓存保留天数
-#
-# scan:
-#   size_basis: allocated       # allocated 或 logical
-#   extra_roots: []             # 额外扫描根
-#   scan_on_start: true
-#   startup_delay: 15s
-#   resume_interrupted: true
-#   require_mount_point: false  # 扫描普通本地目录时可关闭
-#
-# performance:
-#   concurrency: auto           # auto 或固定数字，例如 8
-#   max_metadata_qps: 300
-#   min_metadata_qps: 30
-#   max_cpu_percent: 20
-#   memory_limit: auto           # 按 cgroup/物理内存自动推导；也可写 512MB
-#   adaptive_throttle: true
-#   low_priority: true
-#   sample_interval: 5s
-#   max_host_cpu_percent: 85
-#   max_load1: 0                # 0 表示关闭宿主机 load 检查
-#   nfs_slow_latency: 500ms
-#   nfs_pause_latency: 5s
-#   nfs_pause_cooldown: 30s
-#   max_metadata_errors: 8
-#   progress_interval: 10s
-#   heartbeat_interval: 5s
-#
-# logging:
-#   level: info
-#   format: text

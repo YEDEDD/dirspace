@@ -21,6 +21,7 @@ type treeTask struct {
 	path  string
 	depth int
 	files []string
+	quick *quickFileTask
 }
 
 // treeQueue is an unbounded work queue with dynamic pending accounting. It
@@ -149,15 +150,23 @@ func (s *Scanner) scanTree(ctx context.Context, sess *scanSession, topName, root
 				if !ok {
 					return
 				}
+				if err := sess.acquireSlot(ctx); err != nil {
+					q.done()
+					return
+				}
 				sess.counters.startWorker()
 				var taskAgg treeAggregate
 				var err error
-				if task.files != nil {
+				switch {
+				case task.quick != nil:
+					taskAgg, err = s.processQuickFileTask(ctx, sess, q, task.quick)
+				case task.files != nil:
 					taskAgg, err = s.processFileTask(ctx, sess, topName, task, q)
-				} else {
+				default:
 					taskAgg, err = s.processDirTask(ctx, sess, q, task)
 				}
 				sess.counters.finishWorker()
+				sess.releaseSlot()
 				if err != nil {
 					fail(err)
 				} else {
@@ -240,7 +249,7 @@ func (s *Scanner) processDirTask(ctx context.Context, sess *scanSession, q *tree
 			return agg, err
 		}
 		readStart := time.Now()
-		entries, readErr := f.ReadDir(readBatchSize)
+		entries, readErr := f.ReadDir(sess.batchSize())
 		sess.controller.ObserveMetadata(time.Since(readStart), readErr)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			if task.depth > 0 && errors.Is(readErr, os.ErrNotExist) {

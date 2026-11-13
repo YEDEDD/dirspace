@@ -321,6 +321,13 @@ type ScanConfig struct {
 	QuickInterval Duration `yaml:"quick_interval"`
 	// QuickSamplePercent is the percentage of files sampled by quick mode.
 	QuickSamplePercent int `yaml:"quick_sample_percent"`
+	// QuickCensusFiles makes the first N files in every directory a full
+	// census. Small directories stay exact while large directories sample the
+	// tail; lower values reduce metadata calls at the cost of accuracy.
+	QuickCensusFiles int `yaml:"quick_census_files"`
+	// ReadBatchSize is the number of directory entries requested per ReadDir.
+	// Larger batches reduce READDIR calls on huge directories.
+	ReadBatchSize int `yaml:"read_batch_size"`
 	// IndexDepth controls how many levels of the directory tree are cached in
 	// the drill-down index. Zero disables the index. Deep levels are kept only
 	// for the top IndexTopK children of each indexed parent.
@@ -433,8 +440,10 @@ func DefaultForProfile(name string) *Config {
 			RootPath:            "/mnt",
 			SizeBasis:           "allocated",
 			Interval:            Duration{168 * time.Hour},
-			QuickInterval:       Duration{6 * time.Hour},
+			QuickInterval:       Duration{24 * time.Hour},
 			QuickSamplePercent:  2,
+			QuickCensusFiles:    16,
+			ReadBatchSize:       1024,
 			IndexDepth:          3,
 			IndexTopK:           20,
 			IndexAllDirs:        false,
@@ -646,6 +655,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Scan.QuickSamplePercent < 0 || c.Scan.QuickSamplePercent > 100 {
 		return errors.New("scan.quick_sample_percent 必须在 0 到 100 之间")
+	}
+	if c.Scan.QuickCensusFiles < 0 || c.Scan.QuickCensusFiles > 4096 {
+		return errors.New("scan.quick_census_files 必须在 0 到 4096 之间")
+	}
+	if c.Scan.ReadBatchSize < 32 || c.Scan.ReadBatchSize > 8192 {
+		return errors.New("scan.read_batch_size 必须在 32 到 8192 之间")
 	}
 	if c.Scan.IndexDepth < 0 || c.Scan.IndexDepth > 16 {
 		return errors.New("scan.index_depth 必须在 0 到 16 之间（0 表示关闭目录索引）")
