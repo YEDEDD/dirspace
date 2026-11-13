@@ -32,6 +32,7 @@ type Limits struct {
 // Controller combines the metadata QPS token bucket, process CPU governor,
 // memory pressure check, and adaptive NFS/host-load feedback.
 type Controller struct {
+	limitsMu sync.RWMutex
 	limits   Limits
 	throttle *Throttle
 	cpu      *CPUGuard
@@ -90,13 +91,62 @@ func NewController(limits Limits, log *slog.Logger) *Controller {
 	return controller
 }
 
+func (c *Controller) snapshotLimits() Limits {
+	c.limitsMu.RLock()
+	defer c.limitsMu.RUnlock()
+	return c.limits
+}
+
+// UpdateLimits applies new resource limits to a running scan. It updates QPS,
+// CPU, memory, host-load and latency thresholds. The sampler interval is fixed
+// for the lifetime of a scan; the worker/semaphore limit is handled separately.
+func (c *Controller) UpdateLimits(limits Limits) {
+	if limits.MinQPS < 1 {
+		limits.MinQPS = 1
+	}
+	if limits.MinQPS > limits.BaseQPS {
+		limits.MinQPS = limits.BaseQPS
+	}
+	if limits.SampleInterval < time.Second {
+		limits.SampleInterval = 5 * time.Second
+	}
+	if limits.MaxMetadataError < 1 {
+		limits.MaxMetadataError = 8
+	}
+	c.limitsMu.Lock()
+	old := c.limits
+	c.limits = limits
+	c.limitsMu.Unlock()
+
+	c.throttle.SetMin(float64(limits.MinQPS))
+	rate := c.throttle.Rate()
+	if rate > float64(limits.BaseQPS) {
+		rate = float64(limits.BaseQPS)
+	}
+	if rate < float64(limits.MinQPS) {
+		rate = float64(limits.MinQPS)
+	}
+	if !limits.Adaptive {
+		rate = float64(limits.BaseQPS)
+	}
+	c.throttle.SetRate(rate)
+	c.cpu.SetMaxPercent(limits.MaxCPUPercent)
+	if limits.MemoryLimit > 0 {
+		debug.SetMemoryLimit(limits.MemoryLimit)
+	}
+	c.log.Info("已热更新性能配置",
+		"old_qps", old.BaseQPS, "new_qps", limits.BaseQPS,
+		"old_cpu", old.MaxCPUPercent, "new_cpu", limits.MaxCPUPercent,
+		"current_qps", round1(rate))
+}
+
 // Start launches the background sampler until ctx is cancelled.
 func (c *Controller) Start(ctx context.Context) {
 	go c.loop(ctx)
 }
 
 func (c *Controller) loop(ctx context.Context) {
-	ticker := time.NewTicker(c.limits.SampleInterval)
+	ticker := time.NewTicker(c.snapshotLimits().SampleInterval)
 	defer ticker.Stop()
 	sampler := &hostSampler{}
 	for {
@@ -112,14 +162,15 @@ func (c *Controller) loop(ctx context.Context) {
 func (c *Controller) sample(sampler *hostSampler) {
 	pressure := false
 	reason := ""
+	limits := c.snapshotLimits()
 
 	metrics := sampler.Sample()
 	if metrics.Supported {
-		if c.limits.MaxHostCPU > 0 && metrics.CPUPercent > c.limits.MaxHostCPU {
+		if limits.MaxHostCPU > 0 && metrics.CPUPercent > limits.MaxHostCPU {
 			pressure = true
 			reason = "宿主机 CPU 高"
 		}
-		if c.limits.MaxLoad1 > 0 && metrics.Load1 > c.limits.MaxLoad1 {
+		if limits.MaxLoad1 > 0 && metrics.Load1 > limits.MaxLoad1 {
 			pressure = true
 			reason = "宿主机 Load 高"
 		}
@@ -127,7 +178,7 @@ func (c *Controller) sample(sampler *hostSampler) {
 
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
-	if c.limits.MemoryLimit > 0 && mem.HeapAlloc > uint64(float64(c.limits.MemoryLimit)*0.85) {
+	if limits.MemoryLimit > 0 && mem.HeapAlloc > uint64(float64(limits.MemoryLimit)*0.85) {
 		pressure = true
 		reason = "进程内存接近上限"
 		c.memoryPressure.Store(true)
@@ -135,7 +186,7 @@ func (c *Controller) sample(sampler *hostSampler) {
 			c.lastMemoryGC = time.Now()
 			runtime.GC()
 			c.log.Warn("内存达到阈值，已触发 GC 并暂停元数据请求",
-				"heap_alloc_mb", mem.HeapAlloc>>20, "limit_mb", c.limits.MemoryLimit>>20)
+				"heap_alloc_mb", mem.HeapAlloc>>20, "limit_mb", limits.MemoryLimit>>20)
 		}
 	} else {
 		c.memoryPressure.Store(false)
@@ -144,21 +195,21 @@ func (c *Controller) sample(sampler *hostSampler) {
 	c.mu.Lock()
 	latency := c.latencyEWMA
 	c.mu.Unlock()
-	if c.limits.SlowLatency > 0 && latency > c.limits.SlowLatency.Seconds() {
+	if limits.SlowLatency > 0 && latency > limits.SlowLatency.Seconds() {
 		pressure = true
 		if reason == "" {
 			reason = "NFS 元数据延迟高"
 		}
 	}
 
-	if !c.limits.Adaptive {
+	if !limits.Adaptive {
 		return
 	}
 	rate := c.throttle.Rate()
 	if pressure {
 		next := rate * 0.65
-		if next < float64(c.limits.MinQPS) {
-			next = float64(c.limits.MinQPS)
+		if next < float64(limits.MinQPS) {
+			next = float64(limits.MinQPS)
 		}
 		if next < rate {
 			c.throttle.SetRate(next)
@@ -169,10 +220,10 @@ func (c *Controller) sample(sampler *hostSampler) {
 		c.healthySamples = 0
 	} else {
 		c.healthySamples++
-		if c.healthySamples >= 3 && rate < float64(c.limits.BaseQPS) {
+		if c.healthySamples >= 3 && rate < float64(limits.BaseQPS) {
 			next := rate * 1.2
-			if next > float64(c.limits.BaseQPS) {
-				next = float64(c.limits.BaseQPS)
+			if next > float64(limits.BaseQPS) {
+				next = float64(limits.BaseQPS)
 			}
 			c.throttle.SetRate(next)
 			c.log.Info("资源恢复正常，逐步提高元数据扫描速率", "qps", round1(next))
@@ -223,6 +274,7 @@ func (c *Controller) Wait(ctx context.Context) error {
 
 // ObserveMetadata records the latency and network errors of one metadata call.
 func (c *Controller) ObserveMetadata(d time.Duration, err error) {
+	limits := c.snapshotLimits()
 	c.metadataOps.Add(1)
 	if d > 0 {
 		seconds := d.Seconds()
@@ -233,8 +285,8 @@ func (c *Controller) ObserveMetadata(d time.Duration, err error) {
 			c.latencyEWMA = c.latencyEWMA*0.95 + seconds*0.05
 		}
 		c.mu.Unlock()
-		if c.limits.PauseLatency > 0 && d >= c.limits.PauseLatency {
-			c.PauseFor(c.limits.PauseCooldown, "NFS 元数据延迟超过暂停阈值")
+		if limits.PauseLatency > 0 && d >= limits.PauseLatency {
+			c.PauseFor(limits.PauseCooldown, "NFS 元数据延迟超过暂停阈值")
 		}
 	}
 	if err == nil || !isNetworkError(err) {
@@ -252,8 +304,8 @@ func (c *Controller) ObserveMetadata(d time.Duration, err error) {
 	c.errorTimes = append(kept, now)
 	count := len(c.errorTimes)
 	c.mu.Unlock()
-	if count >= c.limits.MaxMetadataError {
-		c.PauseFor(c.limits.PauseCooldown, "NFS 元数据请求连续异常")
+	if count >= limits.MaxMetadataError {
+		c.PauseFor(limits.PauseCooldown, "NFS 元数据请求连续异常")
 	}
 }
 

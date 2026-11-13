@@ -83,6 +83,19 @@ func (t *Throttle) SetRate(rate float64) {
 	}
 }
 
+// SetMin changes the lower bound used by adaptive throttling.
+func (t *Throttle) SetMin(min float64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if min < 1 {
+		min = 1
+	}
+	t.min = min
+	if t.rate < t.min {
+		t.rate = t.min
+	}
+}
+
 // Rate returns the current sustained rate.
 func (t *Throttle) Rate() float64 {
 	t.mu.Lock()

@@ -14,6 +14,7 @@ import (
 
 	"github.com/YEDEDD/dirspace/internal/config"
 	"github.com/YEDEDD/dirspace/internal/model"
+	"github.com/YEDEDD/dirspace/internal/performance"
 	"github.com/YEDEDD/dirspace/internal/platform"
 	"github.com/YEDEDD/dirspace/internal/storage"
 )
@@ -700,4 +701,78 @@ func TestQuickBudgetMarksPartialLowerBound(t *testing.T) {
 	if !indexed.Truncated {
 		t.Fatal("index entry should be truncated")
 	}
+}
+
+func TestReloadConfigAppliesHotLimits(t *testing.T) {
+	f := newScannerFixture(t)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	body := "profile: normal\nscan:\n  root_path: " + f.root + "\n  require_mount_point: false\nperformance:\n  concurrency: 8\n  max_metadata_qps: 123\n  min_metadata_qps: 1\n  max_cpu_percent: 30\n  adaptive_throttle: false\n"
+	if err := os.WriteFile(configPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.scanner.setConfig(cfg)
+	run, err := f.store.StartRun(context.Background(), f.root, storage.StartOptions{
+		Mode:          model.ModeFull,
+		MetadataLimit: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := performance.NewController(performance.Limits{
+		BaseQPS: 100, MinQPS: 1, Adaptive: false,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	concurrency := newScanConcurrency(1)
+	f.scanner.reloadConfig(run, controller, concurrency)
+	if got := controller.Rate(); got != 123 {
+		t.Fatalf("hot QPS = %v, want 123", got)
+	}
+	if got := concurrency.Limit(); got != 8 {
+		t.Fatalf("hot concurrency = %d, want 8", got)
+	}
+	got, err := f.store.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MetadataLimit != 123 {
+		t.Fatalf("stored metadata limit = %v, want 123", got.MetadataLimit)
+	}
+}
+
+func TestMonitorReloadsChangedConfig(t *testing.T) {
+	f := newScannerFixture(t)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	writeConfig := func(qps int) {
+		body := "profile: normal\nscan:\n  root_path: " + f.root + "\n  require_mount_point: false\nperformance:\n  concurrency: 8\n  max_metadata_qps: " + fmt.Sprint(qps) + "\n  min_metadata_qps: 1\n  max_cpu_percent: 30\n  adaptive_throttle: false\n"
+		if err := os.WriteFile(configPath, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig(100)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.scanner.setConfig(cfg)
+	controller := performance.NewController(performance.Limits{
+		BaseQPS: 100, MinQPS: 1, Adaptive: false,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	concurrency := newScanConcurrency(1)
+	run := &model.Run{ID: 1, RootID: 1, RootPath: f.root}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go f.scanner.monitorControl(ctx, run, &scanControl{}, controller, concurrency, cancel)
+	time.Sleep(200 * time.Millisecond)
+	writeConfig(321)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if controller.Rate() == 321 && concurrency.Limit() == 8 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("config watcher did not apply: qps=%v concurrency=%d", controller.Rate(), concurrency.Limit())
 }

@@ -9,8 +9,8 @@ GitHub: <https://github.com/YEDEDD/dirspace>
 需要 Go 1.27+，也可以直接用 Release 中的 Linux 压缩包。
 
 ```bash
-tar xzf dirspace-1.13.1-linux-amd64.tar.gz
-cd dirspace-1.13.1-linux-amd64
+tar xzf dirspace-1.14.0-linux-amd64.tar.gz
+cd dirspace-1.14.0-linux-amd64
 sudo ./scripts/install.sh
 ```
 
@@ -98,7 +98,21 @@ profile 基线：
 
 慢元数据暂停阈值使用通用名 `slow_metadata_latency`、`pause_metadata_latency`、`pause_cooldown`；旧配置里的 `nfs_slow_latency`、`nfs_pause_latency`、`nfs_pause_cooldown` 仍然兼容。
 
-`concurrency: auto` 按一级目录数分配 worker，内部由共享信号量限制总并发。QPS 从上限约 1/3 起步，压力正常时逐步升高。`memory_limit: auto` 优先取 cgroup 上限的 80%，否则取物理内存 10%，范围 256MB–4GB。
+`concurrency: auto` 的 worker 池会预留到上限，由共享信号量限制实际总并发。QPS 从上限约 1/3 起步，压力正常时逐步升高。`memory_limit: auto` 优先取 cgroup 上限的 80%，否则取物理内存 10%，范围 256MB–4GB。
+
+### 运行中热更新
+
+扫描进程每秒检查一次配置文件（通常是 `/etc/dirspace/config.yaml`）。保存后无需暂停、重启或续扫，约 1 秒内生效：
+
+- `max_metadata_qps`、`min_metadata_qps`
+- `concurrency`：调大立即增加可用并发；调小后新任务等当前元数据调用结束再受限，不中断已发出的 `lstat/readdir`
+- `max_cpu_percent`、`max_host_cpu_percent`、`max_load1`
+- `slow_metadata_latency`、`pause_metadata_latency`、`pause_cooldown`
+- `max_metadata_errors`、`memory_limit`
+
+日志会打印 `检测到配置变更，已热更新运行中的扫描`，`status` 的 QPS 上限也会同步更新。
+
+以下参数仍只在下次启动/扫描时生效：`root_path`、`size_basis`、`index_*`、`quick_*`、`scan.*_interval`、`startup_delay`。改这些需要重启 daemon 或重新发起扫描。daemon 的调度周期和扫描根在启动时读取；正在运行的任务可以热更新 QPS/CPU/并发，但不会改变已绑定的扫描根。
 
 目录索引用于 `children` 和 `size`。默认 `index_all_dirs: true`，会保存每个目录的聚合，`children` 能列任意目录的直接子目录，`size` 能查任意深层路径；代价是数据库随目录数增长，`children` 输出也可能很多，建议加数量限制，例如 `dirspace children --path /mnt/a 100`。
 

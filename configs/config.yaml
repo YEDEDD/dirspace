@@ -43,6 +43,8 @@ scan:
 #   stale_retention_days: 7        # 已删除目录缓存保留天数
 
 # 高级覆盖，通常不需要填写；不写就使用 profile 推导值。
+# 运行中的扫描会每秒检查本文件：修改 QPS、并发、CPU、延迟/暂停阈值约 1 秒内生效；
+# 修改 root_path、size_basis、index_*、scan.*_interval 需重启或下一轮扫描。
 # performance:
 #   concurrency: auto              # auto 或固定数字，例如 8
 #   max_metadata_qps: 1000

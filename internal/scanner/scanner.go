@@ -27,8 +27,21 @@ import (
 // Scanner orchestrates baseline, incremental, and single-directory scans.
 type Scanner struct {
 	store *storage.Store
+	cfgMu sync.RWMutex
 	cfg   *config.Config
 	log   *slog.Logger
+}
+
+func (s *Scanner) config() *config.Config {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
+}
+
+func (s *Scanner) setConfig(cfg *config.Config) {
+	s.cfgMu.Lock()
+	s.cfg = cfg
+	s.cfgMu.Unlock()
 }
 
 func New(store *storage.Store, cfg *config.Config, log *slog.Logger) *Scanner {
@@ -138,7 +151,7 @@ type scanSession struct {
 	counters           *progressCounters
 	control            *scanControl
 	intraWorkers       int
-	slots              chan struct{}
+	slots              *scanConcurrency
 	readBatchSize      int
 	quick              bool
 	quickSamplePercent int
@@ -174,19 +187,13 @@ func (sess *scanSession) acquireSlot(ctx context.Context) error {
 	if sess.slots == nil {
 		return nil
 	}
-	select {
-	case sess.slots <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return sess.slots.Acquire(ctx)
 }
 
 func (sess *scanSession) releaseSlot() {
-	if sess.slots == nil {
-		return
+	if sess.slots != nil {
+		sess.slots.Release()
 	}
-	<-sess.slots
 }
 
 func (sess *scanSession) batchSize() int {
@@ -239,7 +246,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	if !info.IsDir() {
 		return nil, fmt.Errorf("扫描根目录不是目录: %s", rootPath)
 	}
-	if s.cfg.Scan.RequireMountPoint && !mountinfo.IsWithinMount(rootPath) {
+	if s.config().Scan.RequireMountPoint && !mountinfo.IsWithinMount(rootPath) {
 		return nil, fmt.Errorf("扫描根不在独立挂载点上: %s（挂载未就绪，或请关闭 scan.require_mount_point）", rootPath)
 	}
 	if req.TargetDir != "" {
@@ -264,13 +271,13 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		return nil, errors.New("分片只支持精确全量扫描")
 	}
 	basis := model.BasisAllocated
-	if strings.EqualFold(s.cfg.Scan.SizeBasis, "logical") {
+	if strings.EqualFold(s.config().Scan.SizeBasis, "logical") {
 		basis = model.BasisLogical
 	}
 
 	run, err := s.store.StartRun(ctx, rootPath, storage.StartOptions{
 		Mode:           req.Mode,
-		MetadataLimit:  float64(s.cfg.Performance.MaxMetadataQPS),
+		MetadataLimit:  float64(s.config().Performance.MaxMetadataQPS),
 		SizeBasis:      basis,
 		Resume:         req.Resume,
 		ResumeCanceled: req.ResumeCanceled,
@@ -304,32 +311,33 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	counters.current.Store("")
 
 	controller := performance.NewController(performance.Limits{
-		BaseQPS:          s.cfg.Performance.MaxMetadataQPS,
-		MinQPS:           s.cfg.Performance.MinMetadataQPS,
-		MaxCPUPercent:    s.cfg.Performance.MaxCPUPercent,
-		MemoryLimit:      s.cfg.Performance.MemoryLimit.Resolve(),
-		Adaptive:         s.cfg.Performance.AdaptiveThrottle,
-		SampleInterval:   s.cfg.Performance.SampleInterval.Duration,
-		MaxHostCPU:       s.cfg.Performance.MaxHostCPUPercent,
-		MaxLoad1:         s.cfg.Performance.MaxLoad1,
-		SlowLatency:      s.cfg.Performance.SlowMetadataLatency.Duration,
-		PauseLatency:     s.cfg.Performance.PauseMetadataLatency.Duration,
-		PauseCooldown:    s.cfg.Performance.PauseCooldown.Duration,
-		MaxMetadataError: s.cfg.Performance.MaxMetadataErrors,
+		BaseQPS:          s.config().Performance.MaxMetadataQPS,
+		MinQPS:           s.config().Performance.MinMetadataQPS,
+		MaxCPUPercent:    s.config().Performance.MaxCPUPercent,
+		MemoryLimit:      s.config().Performance.MemoryLimit.Resolve(),
+		Adaptive:         s.config().Performance.AdaptiveThrottle,
+		SampleInterval:   s.config().Performance.SampleInterval.Duration,
+		MaxHostCPU:       s.config().Performance.MaxHostCPUPercent,
+		MaxLoad1:         s.config().Performance.MaxLoad1,
+		SlowLatency:      s.config().Performance.SlowMetadataLatency.Duration,
+		PauseLatency:     s.config().Performance.PauseMetadataLatency.Duration,
+		PauseCooldown:    s.config().Performance.PauseCooldown.Duration,
+		MaxMetadataError: s.config().Performance.MaxMetadataErrors,
 	}, s.log)
 	controller.Start(scanCtx)
 
 	oldProcs := runtime.GOMAXPROCS(0)
-	procs := s.cfg.Performance.Concurrency.Limit()
+	procs := s.config().Performance.Concurrency.Limit()
 	if procs < 1 {
 		procs = 1
 	}
 	runtime.GOMAXPROCS(procs)
 	defer runtime.GOMAXPROCS(oldProcs)
 
+	concurrency := newScanConcurrency(procs)
 	monitorCtx, stopMonitor := context.WithCancel(scanCtx)
 	defer stopMonitor()
-	go s.monitorControl(monitorCtx, run, control, cancelScan)
+	go s.monitorControl(monitorCtx, run, control, controller, concurrency, cancelScan)
 
 	entries, err := s.discover(scanCtx, rootPath, req.TargetDir, controller, control)
 	if err != nil {
@@ -415,9 +423,9 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	run.TotalDirs = len(entries)
 
 	var inv *inventoryWriter
-	if s.cfg.Scan.Inventory.Enabled && req.Mode != model.ModeQuick {
+	if s.config().Scan.Inventory.Enabled && req.Mode != model.ModeQuick {
 		inv = newInventoryWriter(scanCtx, cancelScan, s.store, run.ID, run.RootID,
-			s.cfg.Scan.Inventory.BatchSize, s.log)
+			s.config().Scan.Inventory.BatchSize, s.log)
 	}
 	sess := &scanSession{
 		rootPath:           rootPath,
@@ -429,21 +437,21 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		inventory:          inv,
 		counters:           counters,
 		control:            control,
-		readBatchSize:      s.cfg.Scan.ReadBatchSize,
+		readBatchSize:      s.config().Scan.ReadBatchSize,
 		quick:              req.Mode == model.ModeQuick,
-		quickSamplePercent: s.cfg.Scan.QuickSamplePercent,
-		quickCensusFiles:   s.cfg.Scan.QuickCensusFiles,
+		quickSamplePercent: s.config().Scan.QuickSamplePercent,
+		quickCensusFiles:   s.config().Scan.QuickCensusFiles,
 		quickSalt:          uint64(run.ID),
-		quickMaxFiles:      s.cfg.Scan.QuickMaxFilesPerTop,
+		quickMaxFiles:      s.config().Scan.QuickMaxFilesPerTop,
 	}
 	if req.TargetDir == "" && req.Mode != model.ModeIncremental &&
-		(s.cfg.Scan.IndexDepth > 0 || s.cfg.Scan.IndexAllDirs) {
+		(s.config().Scan.IndexDepth > 0 || s.config().Scan.IndexAllDirs) {
 		accuracy := model.AccuracyExact
 		if req.Mode == model.ModeQuick {
 			accuracy = model.AccuracySampled
 		}
-		sess.rollups = newRollupCollector(rootPath, s.cfg.Scan.IndexDepth,
-			s.cfg.Scan.IndexTopK, accuracy, s.cfg.Scan.IndexAllDirs)
+		sess.rollups = newRollupCollector(rootPath, s.config().Scan.IndexDepth,
+			s.config().Scan.IndexTopK, accuracy, s.config().Scan.IndexAllDirs)
 	}
 
 	heartbeatCtx, stopHeartbeat := context.WithCancel(scanCtx)
@@ -481,23 +489,18 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		fatalMu.Unlock()
 		cancelScan()
 	}
-	workerCount := s.cfg.Performance.Concurrency.Effective(len(pending))
-	if workerCount > len(pending) && len(pending) > 0 {
+	// Keep enough top-level and per-tree workers alive for the largest allowed
+	// concurrency. The shared semaphore is the actual limit, so a reload can
+	// raise or lower concurrency without rebuilding the worker pools.
+	workerCount := maxScanWorkers
+	if len(pending) > 0 && workerCount > len(pending) {
 		workerCount = len(pending)
 	}
 	if workerCount < 1 {
 		workerCount = 1
 	}
-	intraLimit := s.cfg.Performance.Concurrency.Limit()
-	if intraLimit < 1 {
-		intraLimit = 1
-	}
-	// Every top-level tree gets a full pool, while one shared semaphore caps
-	// aggregate metadata concurrency. Partitioning the limit by top-level count
-	// starves a single huge directory (for example map) once enough siblings
-	// exist to use all top-level workers.
-	sess.intraWorkers = intraLimit
-	sess.slots = make(chan struct{}, intraLimit)
+	sess.intraWorkers = maxScanWorkers
+	sess.slots = concurrency
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
@@ -749,15 +752,30 @@ func (s *Scanner) discover(ctx context.Context, rootPath, target string, control
 	return entries, nil
 }
 
-func (s *Scanner) monitorControl(ctx context.Context, run *model.Run, control *scanControl, cancel context.CancelFunc) {
+func (s *Scanner) monitorControl(ctx context.Context, run *model.Run, control *scanControl, controller *performance.Controller, concurrency *scanConcurrency, cancel context.CancelFunc) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	paused := false
+	source := s.config().Source
+	var configMod time.Time
+	var configSize int64
+	if source != "" {
+		if info, statErr := os.Stat(source); statErr == nil {
+			configMod, configSize = info.ModTime(), info.Size()
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if source != "" {
+				if info, statErr := os.Stat(source); statErr == nil &&
+					(!info.ModTime().Equal(configMod) || info.Size() != configSize) {
+					configMod, configSize = info.ModTime(), info.Size()
+					s.reloadConfig(run, controller, concurrency)
+				}
+			}
 			state, err := s.store.CheckControl(ctx, run.RootID)
 			if err != nil {
 				s.log.Warn("读取扫描控制状态失败", "error", err.Error())
@@ -788,9 +806,54 @@ func (s *Scanner) monitorControl(ctx context.Context, run *model.Run, control *s
 	}
 }
 
+func (s *Scanner) reloadConfig(run *model.Run, controller *performance.Controller, concurrency *scanConcurrency) {
+	source := s.config().Source
+	cfg, err := config.Load(source)
+	if err != nil {
+		s.log.Warn("配置文件已变化，但重新加载失败", "config", source, "error", err.Error())
+		return
+	}
+	old := s.config()
+	rootChanged := cfg.Scan.RootPath != run.RootPath
+	if rootChanged {
+		s.log.Warn("配置中的 root_path 已改变；运行中的任务仍使用原扫描根",
+			"run_root", run.RootPath, "config_root", cfg.Scan.RootPath)
+	} else {
+		s.setConfig(cfg)
+	}
+	controller.UpdateLimits(performance.Limits{
+		BaseQPS:          cfg.Performance.MaxMetadataQPS,
+		MinQPS:           cfg.Performance.MinMetadataQPS,
+		MaxCPUPercent:    cfg.Performance.MaxCPUPercent,
+		MemoryLimit:      cfg.Performance.MemoryLimit.Resolve(),
+		Adaptive:         cfg.Performance.AdaptiveThrottle,
+		SampleInterval:   cfg.Performance.SampleInterval.Duration,
+		MaxHostCPU:       cfg.Performance.MaxHostCPUPercent,
+		MaxLoad1:         cfg.Performance.MaxLoad1,
+		SlowLatency:      cfg.Performance.SlowMetadataLatency.Duration,
+		PauseLatency:     cfg.Performance.PauseMetadataLatency.Duration,
+		PauseCooldown:    cfg.Performance.PauseCooldown.Duration,
+		MaxMetadataError: cfg.Performance.MaxMetadataErrors,
+	})
+	limit := cfg.Performance.Concurrency.Limit()
+	concurrency.SetLimit(limit)
+	runtime.GOMAXPROCS(limit)
+	updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer updateCancel()
+	if err := s.store.SetRunMetadataLimit(updateCtx, run.ID, float64(cfg.Performance.MaxMetadataQPS)); err != nil {
+		s.log.Warn("更新任务 QPS 限速字段失败", "run_id", run.ID, "error", err.Error())
+	}
+	s.log.Info("检测到配置变更，已热更新运行中的扫描",
+		"run_id", run.ID,
+		"qps", cfg.Performance.MaxMetadataQPS,
+		"workers", limit,
+		"cpu_percent", cfg.Performance.MaxCPUPercent,
+		"old_workers", old.Performance.Concurrency.Limit())
+}
+
 func (s *Scanner) heartbeatLoop(ctx context.Context, run *model.Run, req Request, counters *progressCounters, control *scanControl, controller *performance.Controller, started time.Time, cancel context.CancelFunc) {
-	heartbeat := s.cfg.Performance.HeartbeatInterval.Duration
-	progressEvery := s.cfg.Performance.ProgressInterval.Duration
+	heartbeat := s.config().Performance.HeartbeatInterval.Duration
+	progressEvery := s.config().Performance.ProgressInterval.Duration
 	if heartbeat < time.Second {
 		heartbeat = 5 * time.Second
 	}

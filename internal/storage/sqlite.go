@@ -671,6 +671,12 @@ func (s *Store) HistoryDiff(ctx context.Context, rootID int64, cutoff time.Time)
 	return base, head, rows, nil
 }
 
+// SetRunMetadataLimit records a live QPS limit change for status/monitor.
+func (s *Store) SetRunMetadataLimit(ctx context.Context, runID int64, limit float64) error {
+	_, err := s.wdb.ExecContext(ctx, `UPDATE scan_runs SET metadata_limit=? WHERE id=?`, limit, runID)
+	return err
+}
+
 // SetTotalDirs records how many first-level entries this run will inspect.
 func (s *Store) SetTotalDirs(ctx context.Context, runID int64, total int) error {
 	_, err := s.wdb.ExecContext(ctx, `UPDATE scan_runs SET total_dirs=?, heartbeat_at=? WHERE id=?`,
