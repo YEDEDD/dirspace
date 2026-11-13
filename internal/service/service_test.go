@@ -500,6 +500,36 @@ func TestPartialReturnsCompleteStagedNames(t *testing.T) {
 	}
 }
 
+func TestPartialIncludesLiveAndFilesystemTotals(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	run, err := f.store.StartRun(context.Background(), root, storage.StartOptions{
+		Mode: model.ModeFull, SizeBasis: model.BasisAllocated,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SaveDirProgress(context.Background(), run.ID, []model.DirOutcome{
+		{Name: "alpha", AllocBytes: 3 << 20, FileCount: 7, DirCount: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := f.svc.Partial(context.Background(), root, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.InProgressDirs != 1 || len(view.Dirs) != 1 || !view.Dirs[0].Dir.InProgress {
+		t.Fatalf("live partial view = %+v", view)
+	}
+	if view.InProgressBytes != 3<<20 {
+		t.Fatalf("live bytes = %d", view.InProgressBytes)
+	}
+	if view.FSUsage == nil || view.FSUsage.Total == 0 {
+		t.Fatalf("missing filesystem usage: %+v", view.FSUsage)
+	}
+}
+
 func TestPartialMergesCurrentWithLastPublished(t *testing.T) {
 	f := newServiceFixture(t)
 	root := f.cfg.Scan.RootPath

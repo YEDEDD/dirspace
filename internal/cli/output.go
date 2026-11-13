@@ -359,6 +359,7 @@ type partialDirJSON struct {
 	SymlinkCount    int64     `json:"symlink_count"`
 	DurationSeconds float64   `json:"duration_seconds"`
 	Truncated       bool      `json:"truncated"`
+	InProgress      bool      `json:"in_progress"`
 	Source          string    `json:"source"`
 	DataStatus      string    `json:"data_status"`
 	Accuracy        string    `json:"accuracy"`
@@ -366,25 +367,28 @@ type partialDirJSON struct {
 }
 
 type partialJSON struct {
-	Path          string           `json:"path"`
-	ScanRoot      string           `json:"scan_root"`
-	RunID         int64            `json:"run_id"`
-	Mode          string           `json:"mode"`
-	ModeText      string           `json:"mode_text"`
-	Status        string           `json:"status"`
-	DoneDirs      int              `json:"done_dirs"`
-	TotalDirs     int              `json:"total_dirs"`
-	FileCount     int64            `json:"file_count"`
-	TotalBytes    int64            `json:"total_bytes"`
-	MergedBytes   int64            `json:"merged_total_bytes"`
-	FreshDirs     int              `json:"fresh_dirs"`
-	CarriedDirs   int              `json:"carried_dirs"`
-	FreshBytes    int64            `json:"fresh_total_bytes"`
-	CarriedBytes  int64            `json:"carried_total_bytes"`
-	Mixed         bool             `json:"mixed"`
-	CurrentDir    string           `json:"current_dir"`
-	CompletedDirs []partialDirJSON `json:"directories"`
-	Note          string           `json:"note"`
+	Path            string           `json:"path"`
+	ScanRoot        string           `json:"scan_root"`
+	RunID           int64            `json:"run_id"`
+	Mode            string           `json:"mode"`
+	ModeText        string           `json:"mode_text"`
+	Status          string           `json:"status"`
+	DoneDirs        int              `json:"done_dirs"`
+	TotalDirs       int              `json:"total_dirs"`
+	FileCount       int64            `json:"file_count"`
+	TotalBytes      int64            `json:"total_bytes"`
+	MergedBytes     int64            `json:"merged_total_bytes"`
+	FreshDirs       int              `json:"fresh_dirs"`
+	InProgressDirs  int              `json:"in_progress_dirs"`
+	CarriedDirs     int              `json:"carried_dirs"`
+	FreshBytes      int64            `json:"fresh_total_bytes"`
+	InProgressBytes int64            `json:"in_progress_total_bytes"`
+	CarriedBytes    int64            `json:"carried_total_bytes"`
+	Mixed           bool             `json:"mixed"`
+	FSUsage         *fsUsageJSON     `json:"fs_usage,omitempty"`
+	CurrentDir      string           `json:"current_dir"`
+	CompletedDirs   []partialDirJSON `json:"directories"`
+	Note            string           `json:"note"`
 }
 
 func partialSourceText(source service.PartialSource) string {
@@ -395,7 +399,7 @@ func partialSourceText(source service.PartialSource) string {
 }
 
 func buildPartialJSON(view *service.PartialView) partialJSON {
-	note := "staging 数据：仅包含当前任务已完成的一级目录，尚未发布到正式缓存。"
+	note := "staging 数据：包含当前任务已完成和进行中的一级目录，尚未发布到正式缓存。"
 	if view.CarriedDirs > 0 && view.FreshDirs == 0 {
 		note = "合并视图：本轮尚无已完成目录，当前显示上次成功结果；不是同一时点快照。"
 	} else if view.Mixed {
@@ -404,9 +408,14 @@ func buildPartialJSON(view *service.PartialView) partialJSON {
 	out := partialJSON{
 		Path: view.Path, ScanRoot: view.Root.Path,
 		CompletedDirs: make([]partialDirJSON, 0, len(view.Dirs)),
-		FreshDirs:     view.FreshDirs, CarriedDirs: view.CarriedDirs,
-		FreshBytes: view.FreshBytes, CarriedBytes: view.CarriedBytes,
-		Mixed: view.Mixed, Note: note,
+		FreshDirs:     view.FreshDirs, InProgressDirs: view.InProgressDirs,
+		CarriedDirs: view.CarriedDirs,
+		FreshBytes:  view.FreshBytes, InProgressBytes: view.InProgressBytes,
+		CarriedBytes: view.CarriedBytes, Mixed: view.Mixed, Note: note,
+	}
+	if view.FSUsage != nil {
+		usage := buildFSUsageJSON(view.FSUsage)
+		out.FSUsage = &usage
 	}
 	if view.Run != nil {
 		out.RunID = view.Run.ID
@@ -428,7 +437,8 @@ func buildPartialJSON(view *service.PartialView) partialJSON {
 			LogicalBytes: d.LogicalBytes, FileCount: d.FileCount,
 			DirCount: d.DirCount, SymlinkCount: d.SymlinkCount,
 			DurationSeconds: d.Duration.Seconds(), Truncated: d.Truncated,
-			Source: string(item.Source), DataStatus: string(d.DataStatus),
+			InProgress: d.InProgress,
+			Source:     string(item.Source), DataStatus: string(d.DataStatus),
 			Accuracy: string(d.Accuracy),
 		}
 		if d.LastSuccessAt != nil {
@@ -444,6 +454,20 @@ func printPartial(w io.Writer, view *service.PartialView) {
 	fmt.Fprintln(w, "dirspace 部分扫描结果")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "扫描根：%s\n", view.Root.Path)
+	if view.FSUsage != nil {
+		usage := view.FSUsage
+		usedPct := 0.0
+		if usage.Total > 0 {
+			usedPct = float64(usage.Used) * 100 / float64(usage.Total)
+		}
+		source := usage.Source
+		if source == "" {
+			source = usage.Path
+		}
+		fmt.Fprintf(w, "文件系统：%s（%s） 总 %s，已用 %s，可用 %s（%.0f%%）\n",
+			source, usage.FSType, formatSize(int64(usage.Total)),
+			formatSize(int64(usage.Used)), formatSize(int64(usage.Available)), usedPct)
+	}
 	if view.Run != nil {
 		elapsed := view.Run.Duration
 		if view.Run.FinishedAt == nil {
@@ -458,37 +482,46 @@ func printPartial(w io.Writer, view *service.PartialView) {
 		}
 	}
 	if len(view.Dirs) == 0 {
-		fmt.Fprintln(w, "暂无已完成的目录；当前目录仍在扫描，完成后会出现在这里。")
+		fmt.Fprintln(w, "暂无已完成或进行中的目录；当前目录仍在扫描，完成后会出现在这里。")
 		return
 	}
 	var freshAlloc, freshLogical, freshFiles int64
+	var liveAlloc, liveLogical, liveFiles int64
 	var carriedAlloc, carriedLogical, carriedFiles int64
 	for _, item := range view.Dirs {
-		if item.Source == service.PartialSourceLast {
+		switch {
+		case item.Dir.InProgress:
+			liveAlloc += item.Dir.AllocBytes
+			liveLogical += item.Dir.LogicalBytes
+			liveFiles += item.Dir.FileCount
+		case item.Source == service.PartialSourceLast:
 			carriedAlloc += item.Dir.AllocBytes
 			carriedLogical += item.Dir.LogicalBytes
 			carriedFiles += item.Dir.FileCount
-		} else {
+		default:
 			freshAlloc += item.Dir.AllocBytes
 			freshLogical += item.Dir.LogicalBytes
 			freshFiles += item.Dir.FileCount
 		}
 	}
+	fmt.Fprintf(w, "本轮已完成：%d 个，合计 %s（逻辑 %s，文件 %s）\n",
+		view.FreshDirs, formatSize(freshAlloc), formatSize(freshLogical), formatCount(freshFiles))
+	if view.InProgressDirs > 0 {
+		fmt.Fprintf(w, "本轮进行中：%d 个，当前已扫描 %s（逻辑 %s，文件 %s）\n",
+			view.InProgressDirs, formatSize(liveAlloc), formatSize(liveLogical), formatCount(liveFiles))
+		fmt.Fprintf(w, "本轮合计已扫描：%s（含进行中，进行中数值会继续增长）\n",
+			formatSize(freshAlloc+liveAlloc))
+	}
 	if view.CarriedDirs > 0 {
-		fmt.Fprintf(w, "本轮已完成：%d 个，合计 %s（逻辑 %s，文件 %s）\n",
-			view.FreshDirs, formatSize(freshAlloc), formatSize(freshLogical), formatCount(freshFiles))
 		fmt.Fprintf(w, "沿用上次：%d 个，合计 %s（逻辑 %s，文件 %s）\n",
 			view.CarriedDirs, formatSize(carriedAlloc), formatSize(carriedLogical), formatCount(carriedFiles))
 		fmt.Fprintf(w, "混合合计：%s（非同一时点快照）\n",
-			formatSize(freshAlloc+carriedAlloc))
-	} else {
-		fmt.Fprintf(w, "已完成目录：%d 个，合计 %s（逻辑 %s，文件 %s）\n",
-			view.FreshDirs, formatSize(freshAlloc), formatSize(freshLogical), formatCount(freshFiles))
+			formatSize(freshAlloc+liveAlloc+carriedAlloc))
 	}
 	if view.CarriedDirs > 0 {
-		fmt.Fprintln(w, "说明：本轮已完成的目录用本轮结果，未完成的沿用上次成功结果；不会提前发布 top_dirs。")
+		fmt.Fprintln(w, "说明：本轮已完成/进行中的目录用本轮结果，未开始的沿用上次成功结果；不会提前发布 top_dirs。")
 	} else {
-		fmt.Fprintln(w, "说明：以下为当前任务 staging 结果，尚未发布为正式缓存；快速估算的空间为抽样值。")
+		fmt.Fprintln(w, "说明：以下为本轮 staging 结果，尚未发布为正式缓存；进行中目录的数值会持续更新。")
 	}
 	fmt.Fprintln(w)
 
@@ -498,31 +531,42 @@ func printPartial(w io.Writer, view *service.PartialView) {
 			nameWidth = n
 		}
 	}
-	fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s  %s  %s\n",
+	fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s  %s  %s  %s\n",
 		padRight("排名", 4), padRight("目录名称", nameWidth), padLeft("空间", 12),
-		padLeft("文件数", 14), padLeft("子目录", 8), padLeft("来源", 6),
-		padLeft("耗时", 9), padRight("完成时间", 19))
+		padLeft("文件数", 14), padLeft("子目录", 8), padLeft("状态", 6),
+		padLeft("来源", 6), padLeft("耗时", 9), padRight("完成时间", 19))
 	for i, item := range view.Dirs {
 		d := item.Dir
-		last := d.LastSuccessAt
 		sizeText := formatSize(dirBytes(d, view.SizeBasis))
 		if d.Truncated {
 			sizeText = "≥" + sizeText
 		}
-		fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s  %s  %s\n",
+		status := "完成"
+		if d.InProgress {
+			status = "进行中"
+		} else if item.Source == service.PartialSourceLast {
+			status = "沿用"
+		}
+		completed := "—"
+		if d.LastSuccessAt != nil {
+			completed = formatTimestamp(d.LastSuccessAt)
+		}
+		fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s  %s  %s  %s\n",
 			padRight(fmt.Sprintf("%d", i+1), 4),
 			padRight(validText(d.Name), nameWidth),
 			padLeft(sizeText, 12),
 			padLeft(formatCount(d.FileCount), 14),
 			padLeft(formatCount(d.DirCount), 8),
+			padLeft(status, 6),
 			padLeft(partialSourceText(item.Source), 6),
 			padLeft(formatDuration(d.Duration), 9),
-			padRight(formatTimestamp(last), 19))
+			padRight(completed, 19))
 	}
 }
 
 type fsUsageJSON struct {
 	Path      string `json:"path"`
+	Source    string `json:"source,omitempty"`
 	FSType    string `json:"fs_type"`
 	Total     uint64 `json:"total_bytes"`
 	Used      uint64 `json:"used_bytes"`
@@ -536,7 +580,7 @@ type fsUsageJSON struct {
 
 func buildFSUsageJSON(usage *service.FSUsage) fsUsageJSON {
 	return fsUsageJSON{
-		Path: usage.Path, FSType: usage.FSType,
+		Path: usage.Path, Source: usage.Source, FSType: usage.FSType,
 		Total: usage.Total, Used: usage.Used, Free: usage.Free,
 		Available: usage.Available, BlockSize: usage.BlockSize,
 		TotalText: formatSize(int64(usage.Total)), UsedText: formatSize(int64(usage.Used)),
@@ -548,6 +592,9 @@ func printFSUsage(w io.Writer, usage *service.FSUsage) {
 	fmt.Fprintln(w, "文件系统容量")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "路径：%s\n", validText(usage.Path))
+	if usage.Source != "" {
+		fmt.Fprintf(w, "设备：%s\n", validText(usage.Source))
+	}
 	fmt.Fprintf(w, "类型：%s\n", validText(usage.FSType))
 	fmt.Fprintf(w, "总容量：%s\n", formatSize(int64(usage.Total)))
 	fmt.Fprintf(w, "已用：%s\n", formatSize(int64(usage.Used)))
@@ -709,16 +756,21 @@ func printChildren(w io.Writer, view *service.IndexChildrenView) {
 			nameWidth = n
 		}
 	}
-	fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s\n",
+	fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s  %s\n",
 		padRight("排名", 4), padRight("路径", nameWidth), padLeft("空间", 12),
-		padLeft("文件数", 14), padLeft("子目录", 8), "准确性")
+		padLeft("文件数", 14), padLeft("子目录", 8), padLeft("状态", 6), "准确性")
 	for i, e := range view.Dirs {
-		fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s\n",
+		status := "完成"
+		if e.InProgress {
+			status = "进行中"
+		}
+		fmt.Fprintf(w, "%s  %s  %s  %s  %s  %s  %s\n",
 			padRight(fmt.Sprintf("%d", i+1), 4),
 			padRight(e.Path, nameWidth),
 			padLeft(formatSize(indexBytes(e, view.SizeBasis)), 12),
 			padLeft(formatCount(e.FileCount), 14),
 			padLeft(formatCount(e.DirCount), 8),
+			padLeft(status, 6),
 			e.Accuracy.Label())
 	}
 	fmt.Fprintln(w)

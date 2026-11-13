@@ -42,11 +42,14 @@ func (s *Scanner) scanTop(ctx context.Context, sess *scanSession, name string) (
 	if sess.quick {
 		return s.scanQuickTop(ctx, sess, name)
 	}
+	sess.startLive(name)
 	if err := s.scanTree(ctx, sess, name, full, &out); err != nil {
+		sess.finishLive(name)
 		out.Duration = time.Since(start)
 		out.CompletedAt = time.Now()
 		return out, err
 	}
+	sess.finishLive(name)
 	out.Duration = time.Since(start)
 	out.CompletedAt = time.Now()
 	return out, nil

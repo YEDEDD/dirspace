@@ -173,6 +173,7 @@ func (s *Scanner) scanTree(ctx context.Context, sess *scanSession, topName, root
 					mu.Lock()
 					agg.add(taskAgg)
 					mu.Unlock()
+					sess.addLive(topName, taskAgg)
 				}
 				q.done()
 				if err != nil && ctx.Err() != nil {

@@ -187,6 +187,59 @@ func (c *progressCounters) getCurrent() string {
 	return value
 }
 
+func (s *scanSession) startLive(name string) {
+	if name == "" {
+		return
+	}
+	s.liveMu.Lock()
+	if s.live == nil {
+		s.live = make(map[string]*liveDir)
+	}
+	s.live[name] = &liveDir{out: model.DirOutcome{Name: name}, started: time.Now()}
+	s.liveMu.Unlock()
+}
+
+func (s *scanSession) addLive(name string, agg treeAggregate) {
+	if name == "" {
+		return
+	}
+	s.liveMu.Lock()
+	entry := s.live[name]
+	if entry == nil {
+		entry = &liveDir{out: model.DirOutcome{Name: name}, started: time.Now()}
+		s.live[name] = entry
+	}
+	entry.out.AllocBytes += agg.allocBytes
+	entry.out.LogicalBytes += agg.logicalBytes
+	entry.out.FileCount += agg.fileCount
+	entry.out.DirCount += agg.dirCount
+	entry.out.SymlinkCount += agg.symlinkCount
+	entry.out.TransientErrs += agg.transientErrs
+	s.liveMu.Unlock()
+}
+
+func (s *scanSession) finishLive(name string) {
+	s.liveMu.Lock()
+	delete(s.live, name)
+	s.liveMu.Unlock()
+}
+
+func (s *scanSession) snapshotLive() []model.DirOutcome {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	if len(s.live) == 0 {
+		return nil
+	}
+	out := make([]model.DirOutcome, 0, len(s.live))
+	for _, entry := range s.live {
+		item := entry.out
+		item.Duration = time.Since(entry.started)
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].AllocBytes > out[j].AllocBytes })
+	return out
+}
+
 type scanSession struct {
 	rootPath           string
 	runID              int64
@@ -206,6 +259,13 @@ type scanSession struct {
 	quickSalt          uint64
 	rollups            *rollupCollector
 	quickMaxFiles      int64
+	liveMu             sync.Mutex
+	live               map[string]*liveDir
+}
+
+type liveDir struct {
+	out     model.DirOutcome
+	started time.Time
 }
 
 type fatalError struct{ err error }
@@ -491,6 +551,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		quickCensusFiles:   s.config().Scan.QuickCensusFiles,
 		quickSalt:          uint64(run.ID),
 		quickMaxFiles:      s.config().Scan.QuickMaxFilesPerTop,
+		live:               make(map[string]*liveDir),
 	}
 	if req.TargetDir == "" && req.Mode != model.ModeIncremental &&
 		(s.config().Scan.IndexDepth > 0 || s.config().Scan.IndexAllDirs) {
@@ -504,7 +565,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 
 	heartbeatCtx, stopHeartbeat := context.WithCancel(scanCtx)
 	defer stopHeartbeat()
-	go s.heartbeatLoop(heartbeatCtx, run, req, counters, control, controller, started, cancelScan)
+	go s.heartbeatLoop(heartbeatCtx, run, req, sess, counters, control, controller, started, cancelScan)
 
 	// Files and the directory block directly under the scan root belong to the
 	// root aggregate, not to any first-level child. They are captured before
@@ -916,7 +977,7 @@ func (s *Scanner) reloadConfig(run *model.Run, controller *performance.Controlle
 		"old_workers", old.Performance.Concurrency.Limit())
 }
 
-func (s *Scanner) heartbeatLoop(ctx context.Context, run *model.Run, req Request, counters *progressCounters, control *scanControl, controller *performance.Controller, started time.Time, cancel context.CancelFunc) {
+func (s *Scanner) heartbeatLoop(ctx context.Context, run *model.Run, req Request, sess *scanSession, counters *progressCounters, control *scanControl, controller *performance.Controller, started time.Time, cancel context.CancelFunc) {
 	heartbeat := s.config().Performance.HeartbeatInterval.Duration
 	progressEvery := s.config().Performance.ProgressInterval.Duration
 	if heartbeat < time.Second {
@@ -956,6 +1017,11 @@ func (s *Scanner) heartbeatLoop(ctx context.Context, run *model.Run, req Request
 				return
 			}
 		case <-progressTicker.C:
+			if live := sess.snapshotLive(); len(live) > 0 {
+				if err := s.store.SaveDirProgress(context.WithoutCancel(ctx), run.ID, live); err != nil {
+					s.log.Warn("保存扫描中目录进度失败", "error", err.Error())
+				}
+			}
 			if req.Progress == nil {
 				continue
 			}

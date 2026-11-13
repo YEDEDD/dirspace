@@ -309,6 +309,57 @@ func (s *Service) Children(ctx context.Context, path string, limit int) (*IndexC
 	if err != nil {
 		return nil, err
 	}
+	if run, runErr := s.Store.ActiveRun(ctx, root.ID); runErr == nil {
+		live, liveErr := s.Store.StagedProgressDirs(ctx, run.ID, s.sizeBasis())
+		if liveErr == nil && len(live) > 0 {
+			if rel == "" {
+				byPath := make(map[string]bool, len(dirs)+len(live))
+				for _, d := range dirs {
+					byPath[d.Path] = true
+				}
+				for _, d := range live {
+					if byPath[d.Name] {
+						continue
+					}
+					dirs = append(dirs, model.DirIndexEntry{
+						Path: d.Name, ParentPath: "", Name: d.Name, Depth: 1,
+						AllocBytes: d.AllocBytes, LogicalBytes: d.LogicalBytes,
+						FileCount: d.FileCount, DirCount: d.DirCount,
+						SymlinkCount: d.SymlinkCount,
+						DataStatus:   model.DataPartial, Accuracy: model.AccuracyApproximate,
+						Truncated: d.Truncated, InProgress: true,
+					})
+				}
+			} else if parent == nil {
+				for _, d := range live {
+					if d.Name == rel {
+						parent = &model.DirIndexEntry{
+							Path: rel, ParentPath: "", Name: d.Name, Depth: 1,
+							AllocBytes: d.AllocBytes, LogicalBytes: d.LogicalBytes,
+							FileCount: d.FileCount, DirCount: d.DirCount,
+							SymlinkCount: d.SymlinkCount,
+							DataStatus:   model.DataPartial, Accuracy: model.AccuracyApproximate,
+							Truncated: d.Truncated, InProgress: true,
+						}
+						break
+					}
+				}
+			}
+			sort.SliceStable(dirs, func(i, j int) bool {
+				left, right := dirs[i].AllocBytes, dirs[j].AllocBytes
+				if s.sizeBasis() == model.BasisLogical {
+					left, right = dirs[i].LogicalBytes, dirs[j].LogicalBytes
+				}
+				if left != right {
+					return left > right
+				}
+				return dirs[i].Path < dirs[j].Path
+			})
+			if limit > 0 && len(dirs) > limit {
+				dirs = dirs[:limit]
+			}
+		}
+	}
 	return &IndexChildrenView{
 		Path: requested, ScanRoot: root.Path, Parent: parent,
 		Dirs: dirs, SizeBasis: s.sizeBasis(),
@@ -379,6 +430,7 @@ func (s *Service) Merge(ctx context.Context, targetDB, rootPath string, inputs [
 // FSUsage is the capacity of the filesystem containing Path.
 type FSUsage struct {
 	Path      string
+	Source    string
 	FSType    string
 	Total     uint64
 	Free      uint64
@@ -406,7 +458,7 @@ func (s *Service) FSUsage(ctx context.Context, path string) (*FSUsage, error) {
 	free := uint64(stat.Bfree) * uint64(stat.Bsize)
 	avail := uint64(stat.Bavail) * uint64(stat.Bsize)
 	return &FSUsage{
-		Path: target, FSType: mountinfo.FSType(target),
+		Path: target, Source: mountinfo.Source(target), FSType: mountinfo.FSType(target),
 		Total: total, Free: free, Available: avail,
 		Used: total - free, BlockSize: blockSize,
 	}, nil
@@ -518,16 +570,19 @@ type PartialDir struct {
 // with the last published result for directories the active run has not
 // completed. The merge is read-only and never changes top_dirs.
 type PartialView struct {
-	Path         string
-	Root         model.Root
-	Run          *model.Run
-	Dirs         []PartialDir
-	SizeBasis    model.SizeBasis
-	FreshDirs    int
-	CarriedDirs  int
-	FreshBytes   int64
-	CarriedBytes int64
-	Mixed        bool
+	Path            string
+	Root            model.Root
+	Run             *model.Run
+	Dirs            []PartialDir
+	SizeBasis       model.SizeBasis
+	FreshDirs       int
+	InProgressDirs  int
+	CarriedDirs     int
+	FreshBytes      int64
+	InProgressBytes int64
+	CarriedBytes    int64
+	Mixed           bool
+	FSUsage         *FSUsage
 }
 
 // Partial returns a merged view when includeLast is true: current staged rows
@@ -587,19 +642,38 @@ func (s *Service) Partial(ctx context.Context, path string, limit int, includeLa
 	for i := range staged {
 		staged[i].RootID = root.ID
 		staged[i].Accuracy = accuracy
+		staged[i].InProgress = false
 		if staged[i].Truncated {
 			staged[i].DataStatus = model.DataPartial
 		} else {
 			staged[i].DataStatus = model.DataFresh
 		}
 	}
+	live, err := s.Store.StagedProgressDirs(ctx, run.ID, s.sizeBasis())
+	if err != nil {
+		return nil, err
+	}
+	for i := range live {
+		live[i].RootID = root.ID
+		live[i].Accuracy = accuracy
+		live[i].DataStatus = model.DataPartial
+		live[i].InProgress = true
+	}
 
 	view := &PartialView{
 		Path: requested, Root: *root, Run: run,
 		SizeBasis: s.sizeBasis(),
 	}
-	byName := make(map[string]bool, len(staged))
+	view.FSUsage, _ = s.FSUsage(ctx, requested)
+	byName := make(map[string]bool, len(staged)+len(live))
 	for _, d := range staged {
+		byName[d.Name] = true
+		view.Dirs = append(view.Dirs, PartialDir{Dir: d, Source: PartialSourceCurrent})
+	}
+	for _, d := range live {
+		if byName[d.Name] {
+			continue
+		}
 		byName[d.Name] = true
 		view.Dirs = append(view.Dirs, PartialDir{Dir: d, Source: PartialSourceCurrent})
 	}
@@ -626,11 +700,14 @@ func (s *Service) Partial(ctx context.Context, path string, limit int, includeLa
 		view.Dirs = view.Dirs[:limit]
 	}
 	for _, item := range view.Dirs {
-		switch item.Source {
-		case PartialSourceCurrent:
+		switch {
+		case item.Source == PartialSourceCurrent && item.Dir.InProgress:
+			view.InProgressDirs++
+			view.InProgressBytes += partialBytes(item.Dir, view.SizeBasis)
+		case item.Source == PartialSourceCurrent:
 			view.FreshDirs++
 			view.FreshBytes += partialBytes(item.Dir, view.SizeBasis)
-		case PartialSourceLast:
+		case item.Source == PartialSourceLast:
 			view.CarriedDirs++
 			view.CarriedBytes += partialBytes(item.Dir, view.SizeBasis)
 		}
@@ -675,6 +752,9 @@ type StatusView struct {
 	ActiveDoneAlloc   int64
 	ActiveDoneLogical int64
 	ActiveDoneDirs    int
+	ActiveLiveDirs    int
+	ActiveLiveAlloc   int64
+	ActiveLiveLogical int64
 	DataStatus        model.DataStatus
 	DBPath            string
 	DBSize            int64
@@ -732,6 +812,13 @@ func (s *Service) Status(ctx context.Context, path string) (*StatusView, error) 
 				view.ActiveDoneAlloc += d.AllocBytes
 				view.ActiveDoneLogical += d.LogicalBytes
 				view.ActiveDoneDirs++
+			}
+		}
+		if live, liveErr := s.Store.StagedProgressDirs(ctx, view.Active.ID, model.BasisAllocated); liveErr == nil {
+			for _, d := range live {
+				view.ActiveLiveAlloc += d.AllocBytes
+				view.ActiveLiveLogical += d.LogicalBytes
+				view.ActiveLiveDirs++
 			}
 		}
 	}

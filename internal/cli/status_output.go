@@ -302,6 +302,14 @@ func printStatus(w io.Writer, view *service.StatusView) {
 		if run.CurrentDir != "" {
 			fmt.Fprintf(w, "当前目录：%s\n", run.CurrentDir)
 		}
+		if view.ActiveLiveDirs > 0 {
+			liveBytes := view.ActiveLiveAlloc
+			if view.SizeBasis == model.BasisLogical {
+				liveBytes = view.ActiveLiveLogical
+			}
+			fmt.Fprintf(w, "进行中目录：%d 个，已扫描 %s（另有已完成 %s）\n",
+				view.ActiveLiveDirs, formatSize(liveBytes), formatSize(doneBytes))
+		}
 		if run.ProcessedDirs > 0 && run.TotalDirs > run.ProcessedDirs {
 			eta := time.Duration(float64(elapsed) / float64(run.ProcessedDirs) * float64(run.TotalDirs-run.ProcessedDirs))
 			fmt.Fprintf(w, "预计剩余：约 %s（按已完成目录平均）\n", formatDuration(eta))

@@ -34,8 +34,10 @@ func (s *Scanner) scanQuickTop(ctx context.Context, sess *scanSession, name stri
 	if !info.IsDir() {
 		return out, fmt.Errorf("不是目录: %s", full)
 	}
+	sess.startLive(name)
 	agg, truncated, err := s.scanQuickTree(ctx, sess, full, name)
 	if err != nil {
+		sess.finishLive(name)
 		out.Duration = time.Since(start)
 		out.CompletedAt = time.Now()
 		return out, err
@@ -47,6 +49,7 @@ func (s *Scanner) scanQuickTop(ctx context.Context, sess *scanSession, name stri
 	out.SymlinkCount = agg.symlinkCount
 	out.TransientErrs = agg.transientErrs
 	out.Truncated = truncated
+	sess.finishLive(name)
 	out.Duration = time.Since(start)
 	out.CompletedAt = time.Now()
 	return out, nil

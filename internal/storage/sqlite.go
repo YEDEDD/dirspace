@@ -688,7 +688,7 @@ func (s *Store) SetTotalDirs(ctx context.Context, runID int64, total int) error 
 func (s *Store) CompletedDirs(ctx context.Context, runID int64) (map[string]model.DirOutcome, error) {
 	rows, err := s.rdb.QueryContext(ctx, `SELECT name, alloc_bytes, logical_bytes, file_count,
 		dir_count, symlink_count, duration_ms, transient_errors, truncated, completed_at
-		FROM run_dirs WHERE run_id=? AND error=''`, runID)
+		FROM run_dirs WHERE run_id=? AND error='' AND completed_at>0`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -718,6 +718,78 @@ func (s *Store) DeleteDirResult(ctx context.Context, runID int64, name string) e
 	defer s.writeMu.Unlock()
 	_, err := s.wdb.ExecContext(ctx, `DELETE FROM run_dirs WHERE run_id=? AND name=?`, runID, name)
 	return err
+}
+
+// StagedProgressDirs returns first-level directories that are still being
+// scanned. They live in run_dirs with completed_at=0 and are never promoted to
+// top_dirs until SaveDirResult marks them complete.
+func (s *Store) StagedProgressDirs(ctx context.Context, runID int64, basis model.SizeBasis) ([]model.DirStat, error) {
+	orderBy := "alloc_bytes"
+	if basis == model.BasisLogical {
+		orderBy = "logical_bytes"
+	}
+	rows, err := s.rdb.QueryContext(ctx, `SELECT name, alloc_bytes, logical_bytes, file_count,
+		dir_count, symlink_count, duration_ms, truncated
+		FROM run_dirs WHERE run_id=? AND error='' AND completed_at=0
+		ORDER BY `+orderBy+` DESC, name ASC`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []model.DirStat
+	for rows.Next() {
+		var d model.DirStat
+		var durationMS int64
+		var truncated int
+		if err := rows.Scan(&d.Name, &d.AllocBytes, &d.LogicalBytes, &d.FileCount,
+			&d.DirCount, &d.SymlinkCount, &durationMS, &truncated); err != nil {
+			return nil, err
+		}
+		d.ID = runID
+		d.Truncated = truncated != 0
+		d.InProgress = true
+		d.Duration = time.Duration(durationMS) * time.Millisecond
+		d.DataStatus = model.DataPartial
+		result = append(result, d)
+	}
+	return result, rows.Err()
+}
+
+// SaveDirProgress persists a live snapshot of unfinished first-level directory
+// aggregates. A completed row is never overwritten by a later partial snapshot.
+func (s *Store) SaveDirProgress(ctx context.Context, runID int64, outs []model.DirOutcome) error {
+	if len(outs) == 0 {
+		return nil
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		for _, out := range outs {
+			truncated := 0
+			if out.Truncated {
+				truncated = 1
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO run_dirs
+				(run_id, name, alloc_bytes, logical_bytes, file_count, dir_count, symlink_count,
+				 duration_ms, transient_errors, truncated, error, completed_at)
+				VALUES(?,?,?,?,?,?,?,?,?,?, '', 0)
+				ON CONFLICT(run_id, name) DO UPDATE SET
+				 alloc_bytes=excluded.alloc_bytes, logical_bytes=excluded.logical_bytes,
+				 file_count=excluded.file_count, dir_count=excluded.dir_count,
+				 symlink_count=excluded.symlink_count, duration_ms=excluded.duration_ms,
+				 transient_errors=excluded.transient_errors, truncated=excluded.truncated
+				WHERE run_dirs.completed_at=0`,
+				runID, out.Name, out.AllocBytes, out.LogicalBytes, out.FileCount, out.DirCount,
+				out.SymlinkCount, out.Duration.Milliseconds(), out.TransientErrs, truncated); err != nil {
+				return err
+			}
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE scan_runs SET
+			processed_dirs=(SELECT COUNT(*) FROM run_dirs WHERE run_id=? AND completed_at>0),
+			total_files=COALESCE((SELECT SUM(file_count) FROM run_dirs WHERE run_id=? AND error=''),0),
+			total_bytes=COALESCE((SELECT SUM(alloc_bytes) FROM run_dirs WHERE run_id=? AND error=''),0),
+			heartbeat_at=? WHERE id=?`,
+			runID, runID, runID, nowMillis(), runID)
+		return err
+	})
 }
 
 // SaveDirResult atomically stages one completed directory and updates progress.
@@ -751,7 +823,7 @@ func (s *Store) SaveDirResult(ctx context.Context, runID int64, out model.DirOut
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `UPDATE scan_runs SET
-			processed_dirs=(SELECT COUNT(*) FROM run_dirs WHERE run_id=?),
+			processed_dirs=(SELECT COUNT(*) FROM run_dirs WHERE run_id=? AND completed_at>0),
 			total_files=COALESCE((SELECT SUM(file_count) FROM run_dirs WHERE run_id=? AND error=''),0),
 			total_bytes=COALESCE((SELECT SUM(alloc_bytes) FROM run_dirs WHERE run_id=? AND error=''),0),
 			heartbeat_at=?, current_dir=? WHERE id=?`,
@@ -824,7 +896,7 @@ func (s *Store) DeleteIncompleteHardlinks(ctx context.Context, runID int64) erro
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	_, err := s.wdb.ExecContext(ctx, `DELETE FROM hardlink_seen WHERE run_id=? AND top_dir<>'.' AND top_dir NOT IN
-		(SELECT name FROM run_dirs WHERE run_id=? AND error='')`, runID, runID)
+		(SELECT name FROM run_dirs WHERE run_id=? AND error='' AND completed_at>0)`, runID, runID)
 	return err
 }
 
@@ -998,7 +1070,7 @@ func (s *Store) CompleteRun(ctx context.Context, runID int64, single, preserveMi
 		var staged []dirRow
 		rows, err := tx.QueryContext(ctx, `SELECT name, alloc_bytes, logical_bytes, file_count,
 			dir_count, symlink_count, duration_ms, transient_errors, truncated, error, completed_at
-			FROM run_dirs WHERE run_id=?`, runID)
+			FROM run_dirs WHERE run_id=? AND completed_at>0`, runID)
 		if err != nil {
 			return err
 		}
@@ -1651,7 +1723,7 @@ func (s *Store) StagedDirs(ctx context.Context, runID int64, limit int, basis mo
 	}
 	query := `SELECT name, alloc_bytes, logical_bytes, file_count, dir_count,
 		symlink_count, duration_ms, truncated, completed_at
-		FROM run_dirs WHERE run_id=? AND error='' ORDER BY ` + orderBy + ` DESC, name ASC`
+		FROM run_dirs WHERE run_id=? AND error='' AND completed_at>0 ORDER BY ` + orderBy + ` DESC, name ASC`
 	args := []any{runID}
 	if limit > 0 {
 		query += ` LIMIT ?`

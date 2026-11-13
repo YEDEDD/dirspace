@@ -104,6 +104,7 @@ func (s *Scanner) scanQuickTree(ctx context.Context, sess *scanSession, root, to
 						mu.Lock()
 						agg.add(a)
 						mu.Unlock()
+						sess.addLive(topName, a)
 					})
 				}
 				sess.counters.finishWorker(topName)
@@ -111,6 +112,9 @@ func (s *Scanner) scanQuickTree(ctx context.Context, sess *scanSession, root, to
 				mu.Lock()
 				agg.add(taskAgg)
 				mu.Unlock()
+				if task.quick == nil {
+					sess.addLive(topName, taskAgg)
+				}
 				if err != nil {
 					if errors.Is(err, errQuickBudget) {
 						budget.truncated.Store(true)

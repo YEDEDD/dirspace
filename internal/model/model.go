@@ -168,6 +168,7 @@ type DirStat struct {
 	LastAttemptAt *time.Time
 	LastError     string
 	Truncated     bool
+	InProgress    bool
 }
 
 // HasData reports whether a row has a successful baseline to display.
@@ -191,6 +192,7 @@ type DirIndexEntry struct {
 	DataStatus   DataStatus
 	Accuracy     Accuracy
 	Truncated    bool
+	InProgress   bool
 	UpdatedAt    time.Time
 }
 
