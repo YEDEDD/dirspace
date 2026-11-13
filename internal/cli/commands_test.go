@@ -209,6 +209,9 @@ func TestCLIVersionHelp(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "dirspace") {
 		t.Fatalf("help: %s", stdout)
 	}
+	if !strings.Contains(stdout, "常用查询") || !strings.Contains(stdout, "children --path") || !strings.Contains(stdout, "size --path") {
+		t.Fatalf("help is missing common query examples: %s", stdout)
+	}
 }
 
 func TestConfigExplainWorksWithoutDatabase(t *testing.T) {

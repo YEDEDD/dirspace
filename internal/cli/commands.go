@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.15.6"
+var Version = "1.15.7"
 
 const (
 	exitOK      = 0
@@ -342,7 +342,7 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 		if len(cmd.args) == 1 {
 			limit, err = parsePositiveInt(cmd.args[0], "children 数量")
 			if err != nil {
-				fmt.Fprintf(stderr, "参数错误: %v\n", err)
+				fmt.Fprintf(stderr, "参数错误: %v（路径请用 --path <绝对路径>，数字表示显示条数）\n", err)
 				return exitUsage
 			}
 		}
@@ -847,9 +847,9 @@ func printHelp(w io.Writer) {
   （无命令）          等同于 top 10
   top <N>             显示空间排名前 N 个一级目录（默认 10）
   list                显示全部一级目录
-  children [N]        显示目录索引中某个目录的直接子目录（--path 指定；N 可选）
+  children [N]        显示指定目录的直接子目录（--path 指定目录；N 为显示条数）
   diff                对比最近两次同模式完成快照（--since 7d）
-  size                查询一个目录的已缓存大小；--exact 强制精扫该目录
+  size                查询一个目录的大小；--exact 强制重扫，获取最新值
   fs-usage            查询整个挂载点的容量、已用和可用空间（statfs）
   merge               合并多个分片数据库（--db 目标库，--inputs 分片列表）
   partial             显示本轮已完成目录，未完成的沿用上次结果（--staging-only 只看本轮）
@@ -895,11 +895,25 @@ func printHelp(w io.Writer) {
   --help, -h              帮助
   --version, -v           版本
 
+常用查询:
+  # 一级目录排名
+  dirspace top 10
+  # 查某个目录下的直接子目录；路径必须用 --path，数字是显示条数
+  dirspace children --path /data/beegfs_storage/cloud_storage_data
+  dirspace children --path /data/beegfs_storage/cloud_storage_data 30
+  # 查某个目录的最新大小；--exact 会强制重新扫该目录，不用旧缓存
+  dirspace size --path /data/beegfs_storage/cloud_storage_data/4ZdQuVyZiDS/common/51r1PstJ1hy --exact
+  # 查扫描中的一级目录进度
+  dirspace partial --path /data/beegfs_storage
+  # 刷新整个扫描根
+  dirspace refresh --path /data/beegfs_storage
+
 示例:
   dirspace
   dirspace top 20
   dirspace list --json
   dirspace children --path /data/cache-a 100
+  dirspace children --path /data/cache-a/subdir
   dirspace diff --path /mnt --since 7d
   dirspace size --path /data/cache-a
   dirspace size --path /data/cache-a --exact
