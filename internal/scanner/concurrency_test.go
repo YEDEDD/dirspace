@@ -66,3 +66,24 @@ func TestScanConcurrencyHonorsContext(t *testing.T) {
 		t.Fatal("expected context cancellation while waiting for a slot")
 	}
 }
+
+func TestProgressCountersShowWorkersPerDirectory(t *testing.T) {
+	counters := &progressCounters{}
+	counters.startCurrent("alpha")
+	counters.startCurrent("beta")
+	counters.startWorker("alpha")
+	counters.startWorker("alpha")
+	counters.startWorker("beta")
+	if got := counters.getCurrent(); got != "alpha×2, beta×1" {
+		t.Fatalf("current text = %q, want alpha×2, beta×1", got)
+	}
+	counters.finishWorker("alpha")
+	counters.finishCurrent("alpha")
+	if got := counters.getCurrent(); got != "alpha×1, beta×1" {
+		t.Fatalf("current text after first finish = %q, want alpha×1, beta×1", got)
+	}
+	counters.finishWorker("alpha")
+	if got := counters.getCurrent(); got != "beta×1" {
+		t.Fatalf("current text after final finish = %q, want beta×1", got)
+	}
+}

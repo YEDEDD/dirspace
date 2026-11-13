@@ -87,13 +87,36 @@ type progressCounters struct {
 	// of top-level directories that workers are actually scanning; a slow
 	// directory must not disappear from status just because a faster worker
 	// started (and finished) later.
-	current  atomic.Value // string
-	active   map[string]int
-	activeMu sync.Mutex
+	current    atomic.Value // string
+	active     map[string]int
+	dirWorkers map[string]int
+	activeMu   sync.Mutex
 }
 
-func (c *progressCounters) startWorker()  { c.workers.Add(1) }
-func (c *progressCounters) finishWorker() { c.workers.Add(-1) }
+func (c *progressCounters) startWorker(name string) {
+	c.workers.Add(1)
+	c.activeMu.Lock()
+	if c.dirWorkers == nil {
+		c.dirWorkers = make(map[string]int)
+	}
+	c.dirWorkers[name]++
+	c.current.Store(c.activeTextLocked())
+	c.activeMu.Unlock()
+}
+
+func (c *progressCounters) finishWorker(name string) {
+	c.workers.Add(-1)
+	c.activeMu.Lock()
+	if c.dirWorkers != nil {
+		if n := c.dirWorkers[name]; n <= 1 {
+			delete(c.dirWorkers, name)
+		} else {
+			c.dirWorkers[name] = n - 1
+		}
+	}
+	c.current.Store(c.activeTextLocked())
+	c.activeMu.Unlock()
+}
 
 func (c *progressCounters) startCurrent(name string) {
 	c.activeMu.Lock()
@@ -121,18 +144,42 @@ func (c *progressCounters) finishCurrent(name string) {
 }
 
 func (c *progressCounters) activeTextLocked() string {
-	if len(c.active) == 0 {
+	if len(c.active) == 0 && len(c.dirWorkers) == 0 {
 		return ""
 	}
-	names := make([]string, 0, len(c.active))
+	seen := make(map[string]bool, len(c.active)+len(c.dirWorkers))
+	names := make([]string, 0, len(c.active)+len(c.dirWorkers))
 	for name := range c.active {
-		names = append(names, name)
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	for name := range c.dirWorkers {
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
-	if len(names) <= 3 {
-		return strings.Join(names, ", ")
+	label := func(name string) string {
+		if n := c.dirWorkers[name]; n > 0 {
+			return fmt.Sprintf("%s×%d", name, n)
+		}
+		return name
 	}
-	return strings.Join(names[:3], ", ") + fmt.Sprintf(" 等 %d 个目录", len(names))
+	if len(names) <= 3 {
+		parts := make([]string, 0, len(names))
+		for _, name := range names {
+			parts = append(parts, label(name))
+		}
+		return strings.Join(parts, ", ")
+	}
+	parts := make([]string, 0, 3)
+	for _, name := range names[:3] {
+		parts = append(parts, label(name))
+	}
+	return strings.Join(parts, ", ") + fmt.Sprintf(" 等 %d 个目录", len(names))
 }
 
 func (c *progressCounters) getCurrent() string {

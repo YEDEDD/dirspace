@@ -154,7 +154,7 @@ func (s *Scanner) scanTree(ctx context.Context, sess *scanSession, topName, root
 					q.done()
 					return
 				}
-				sess.counters.startWorker()
+				sess.counters.startWorker(topName)
 				var taskAgg treeAggregate
 				var err error
 				switch {
@@ -165,7 +165,7 @@ func (s *Scanner) scanTree(ctx context.Context, sess *scanSession, topName, root
 				default:
 					taskAgg, err = s.processDirTask(ctx, sess, q, task)
 				}
-				sess.counters.finishWorker()
+				sess.counters.finishWorker(topName)
 				sess.releaseSlot()
 				if err != nil {
 					fail(err)

@@ -41,7 +41,7 @@ var errQuickBudget = errors.New("quick per-directory budget reached")
 // recursion, every subdirectory is an independent queue task, so one huge
 // first-level directory cannot pin the whole scan to one worker. The boolean
 // result reports whether a per-top budget stopped the walk early.
-func (s *Scanner) scanQuickTree(ctx context.Context, sess *scanSession, root string) (treeAggregate, bool, error) {
+func (s *Scanner) scanQuickTree(ctx context.Context, sess *scanSession, root, topName string) (treeAggregate, bool, error) {
 	budget := &quickBudget{max: sess.quickMaxFiles}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -94,7 +94,7 @@ func (s *Scanner) scanQuickTree(ctx context.Context, sess *scanSession, root str
 					q.done()
 					return
 				}
-				sess.counters.startWorker()
+				sess.counters.startWorker(topName)
 				var taskAgg treeAggregate
 				var err error
 				if task.quick != nil {
@@ -106,7 +106,7 @@ func (s *Scanner) scanQuickTree(ctx context.Context, sess *scanSession, root str
 						mu.Unlock()
 					})
 				}
-				sess.counters.finishWorker()
+				sess.counters.finishWorker(topName)
 				sess.releaseSlot()
 				mu.Lock()
 				agg.add(taskAgg)

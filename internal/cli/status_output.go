@@ -306,6 +306,9 @@ func printStatus(w io.Writer, view *service.StatusView) {
 			eta := time.Duration(float64(elapsed) / float64(run.ProcessedDirs) * float64(run.TotalDirs-run.ProcessedDirs))
 			fmt.Fprintf(w, "预计剩余：约 %s（按已完成目录平均）\n", formatDuration(eta))
 		}
+		if run.ActiveWorkers > 0 {
+			fmt.Fprintf(w, "活跃 worker：%d\n", run.ActiveWorkers)
+		}
 		fmt.Fprintf(w, "元数据 QPS：窗口实际 %.1f / 当前限速 %.1f（累计 %s 次）\n",
 			view.MetadataQPS, view.MetadataLimit, formatCount(view.MetadataOps))
 	} else if view.Last != nil && view.MetadataLimit > 0 {

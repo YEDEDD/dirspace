@@ -34,7 +34,7 @@ func (s *Scanner) scanQuickTop(ctx context.Context, sess *scanSession, name stri
 	if !info.IsDir() {
 		return out, fmt.Errorf("不是目录: %s", full)
 	}
-	agg, truncated, err := s.scanQuickTree(ctx, sess, full)
+	agg, truncated, err := s.scanQuickTree(ctx, sess, full, name)
 	if err != nil {
 		out.Duration = time.Since(start)
 		out.CompletedAt = time.Now()
