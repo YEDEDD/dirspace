@@ -490,6 +490,7 @@ func (p *PerformanceConfig) UnmarshalYAML(value *yaml.Node) error {
 	} else if aux.LegacyPauseCool != nil {
 		p.PauseCooldown = *aux.LegacyPauseCool
 	}
+	p.explicit = explicit
 	return nil
 }
 

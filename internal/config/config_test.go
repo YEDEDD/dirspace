@@ -278,6 +278,22 @@ func TestAutoMemoryLimit(t *testing.T) {
 	}
 }
 
+func TestAutoProfileKeepsExplicitYAMLOverrides(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := "profile: auto\nscan:\n  root_path: " + filepath.Join(dir, "root") + "\nperformance:\n  max_metadata_qps: 123\n  concurrency: 7\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Performance.MaxMetadataQPS != 123 || cfg.Performance.Concurrency.Max != 7 {
+		t.Fatalf("explicit YAML override lost: %+v", cfg.Performance)
+	}
+}
+
 func TestAutoProfileUsesFilesystemClass(t *testing.T) {
 	cfg := DefaultForProfile("auto")
 	cfg.applyAutoProfileForClass("local")
