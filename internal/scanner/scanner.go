@@ -312,9 +312,9 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 		SampleInterval:   s.cfg.Performance.SampleInterval.Duration,
 		MaxHostCPU:       s.cfg.Performance.MaxHostCPUPercent,
 		MaxLoad1:         s.cfg.Performance.MaxLoad1,
-		SlowLatency:      s.cfg.Performance.NFSSlowLatency.Duration,
-		PauseLatency:     s.cfg.Performance.NFSPauseLatency.Duration,
-		PauseCooldown:    s.cfg.Performance.NFSPauseCooldown.Duration,
+		SlowLatency:      s.cfg.Performance.SlowMetadataLatency.Duration,
+		PauseLatency:     s.cfg.Performance.PauseMetadataLatency.Duration,
+		PauseCooldown:    s.cfg.Performance.PauseCooldown.Duration,
 		MaxMetadataError: s.cfg.Performance.MaxMetadataErrors,
 	}, s.log)
 	controller.Start(scanCtx)

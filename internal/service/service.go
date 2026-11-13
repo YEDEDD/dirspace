@@ -224,7 +224,7 @@ func (s *Service) Query(ctx context.Context, path string, limit int) (*View, err
 			}
 		}
 		view.DataStatus = s.EffectiveStatus(status, root.LastSuccessAt)
-		view.Server = mountinfo.Server(root.Path)
+		view.Server = mountinfo.Source(root.Path)
 		view.FSType = mountinfo.FSType(root.Path)
 		return view, nil
 	} else if !errors.Is(err, storage.ErrNotFound) {
@@ -253,7 +253,7 @@ func (s *Service) Query(ctx context.Context, path string, limit int) (*View, err
 	view.Single = true
 	view.Dirs = []model.DirStat{*target}
 	view.DataStatus = s.EffectiveStatus(target.DataStatus, target.LastSuccessAt)
-	view.Server = mountinfo.Server(root.Path)
+	view.Server = mountinfo.Source(root.Path)
 	view.FSType = mountinfo.FSType(root.Path)
 	return view, nil
 }
@@ -313,6 +313,42 @@ func (s *Service) Children(ctx context.Context, path string, limit int) (*IndexC
 		Path: requested, ScanRoot: root.Path, Parent: parent,
 		Dirs: dirs, SizeBasis: s.sizeBasis(),
 	}, nil
+}
+
+// HistoryDiffView compares two completed snapshots by top-level directory.
+type HistoryDiffView struct {
+	Path  string
+	Root  string
+	Since time.Duration
+	Base  *model.Run
+	Head  *model.Run
+	Rows  []storage.HistoryDiffRow
+}
+
+// Diff compares the newest completed full/quick run with the newest completed
+// run of the same mode at or before the requested cutoff. It is a cache-only
+// report; it does not rescan the filesystem.
+func (s *Service) Diff(ctx context.Context, path string, since time.Duration) (*HistoryDiffView, error) {
+	if since <= 0 {
+		return nil, errors.New("diff 需要正的时间范围，例如 --since 7d")
+	}
+	requested, err := config.NormalizeAbsolutePath(path)
+	if err != nil {
+		return nil, err
+	}
+	root, err := s.findScannedRoot(ctx, requested)
+	if err != nil {
+		return nil, err
+	}
+	cutoff := time.Now().Add(-since)
+	base, head, rows, err := s.Store.HistoryDiff(ctx, root.ID, cutoff)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, fmt.Errorf("没有可对比的完成快照：需要至少两次同模式完成扫描，且新快照在 %s 之后", since)
+		}
+		return nil, err
+	}
+	return &HistoryDiffView{Path: requested, Root: root.Path, Since: since, Base: base, Head: head, Rows: rows}, nil
 }
 
 // Merge combines disjoint shard databases for one root into targetDB.
@@ -728,7 +764,7 @@ func (s *Service) Status(ctx context.Context, path string) (*StatusView, error) 
 	view.DirCount, _ = s.Store.CountDirs(ctx, root.ID)
 	view.StaleDirs, _ = s.Store.CountStaleDirs(ctx, root.ID)
 	view.DBSize = databaseSize(s.Store.Path())
-	view.Server = mountinfo.Server(root.Path)
+	view.Server = mountinfo.Source(root.Path)
 	view.FSType = mountinfo.FSType(root.Path)
 	if target != nil {
 		view.DataStatus = s.EffectiveStatus(target.DataStatus, target.LastSuccessAt)

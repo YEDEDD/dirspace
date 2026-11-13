@@ -25,3 +25,24 @@ func TestMountCoversRejectsRootFilesystem(t *testing.T) {
 		t.Fatal("root filesystem must not count as a protected mount")
 	}
 }
+
+func TestFSTypeClass(t *testing.T) {
+	cases := map[string]string{
+		"xfs":          "local",
+		"ext4":         "local",
+		"zfs":          "local",
+		"nfs":          "network",
+		"nfs4":         "network",
+		"cifs":         "network",
+		"ceph":         "network",
+		"lustre":       "network",
+		"fuse":         "fuse",
+		"fuse.juicefs": "fuse",
+		"":             "unknown",
+	}
+	for fs, want := range cases {
+		if got := FSTypeClass(fs); got != want {
+			t.Fatalf("FSTypeClass(%q)=%q want %q", fs, got, want)
+		}
+	}
+}

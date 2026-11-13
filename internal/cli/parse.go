@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type options struct {
@@ -13,6 +14,8 @@ type options struct {
 	logLevel    string
 	output      string
 	days        int
+	since       time.Duration
+	sinceSet    bool
 	json        bool
 	logical     bool
 	full        bool
@@ -37,7 +40,7 @@ type usageError struct{ message string }
 func (e *usageError) Error() string { return e.message }
 
 func parseArgs(args []string) (*options, error) {
-	opts := &options{days: -1}
+	opts := &options{days: -1, since: 7 * 24 * time.Hour}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
@@ -86,7 +89,7 @@ func parseArgs(args []string) (*options, error) {
 		case arg == "--version" || arg == "-v":
 			opts.version = true
 		case arg == "--path" || arg == "--config" || arg == "--db" ||
-			arg == "--log-level" || arg == "--output" || arg == "--days":
+			arg == "--log-level" || arg == "--output" || arg == "--days" || arg == "--since":
 			if i+1 >= len(args) {
 				return nil, &usageError{fmt.Sprintf("%s 需要一个参数", arg)}
 			}
@@ -115,6 +118,14 @@ func parseArgs(args []string) (*options, error) {
 				return nil, &usageError{fmt.Sprintf("--days 需要正整数，收到 %q", value)}
 			}
 			opts.days = days
+		case strings.HasPrefix(arg, "--since="):
+			value := strings.TrimPrefix(arg, "--since=")
+			since, err := parseSince(value)
+			if err != nil {
+				return nil, err
+			}
+			opts.since = since
+			opts.sinceSet = true
 		case strings.HasPrefix(arg, "-"):
 			return nil, &usageError{fmt.Sprintf("未知参数: %s", arg)}
 		default:
@@ -146,6 +157,13 @@ func assignOption(opts *options, name, value string) error {
 			return &usageError{fmt.Sprintf("--days 需要正整数，收到 %q", value)}
 		}
 		opts.days = days
+	case "--since":
+		since, err := parseSince(value)
+		if err != nil {
+			return err
+		}
+		opts.since = since
+		opts.sinceSet = true
 	default:
 		return &usageError{fmt.Sprintf("未知参数: %s", name)}
 	}
@@ -188,4 +206,26 @@ func splitInputs(value string) []string {
 		}
 	}
 	return out
+}
+
+func parseSince(value string) (time.Duration, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return 0, &usageError{"--since 需要时间范围，例如 7d、24h"}
+	}
+	if strings.HasSuffix(raw, "d") || strings.HasSuffix(raw, "w") {
+		n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSuffix(raw, "d"), "w"))
+		if err != nil || n < 1 {
+			return 0, &usageError{fmt.Sprintf("--since 需要正数天数/周数，收到 %q", value)}
+		}
+		if strings.HasSuffix(raw, "w") {
+			return time.Duration(n) * 7 * 24 * time.Hour, nil
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0, &usageError{fmt.Sprintf("--since 需要正的时间范围，例如 7d、24h，收到 %q", value)}
+	}
+	return d, nil
 }

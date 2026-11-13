@@ -1,6 +1,6 @@
 # dirspace
 
-`dirspace` 是面向 Linux 的目录空间扫描与缓存服务，适合 NFS、CFS、Lustre 等共享文件系统。它只读元数据，统计扫描根下**一级子目录**的空间、文件数、子目录数、耗时和准确性，并把目录索引写入本地 SQLite。日常查询只读本地缓存。
+`dirspace` 是面向 Linux 的大容量目录空间计量与缓存服务，适合 TB～PB 级本地或共享文件系统：XFS、ext4、ZFS、Btrfs、NFS、SMB/CIFS、CephFS、Lustre、GPFS、FUSE 等，只要 Linux 能读出 POSIX 目录树即可。它只读元数据，统计扫描根下**一级子目录**的空间、文件数、子目录数、耗时和准确性，并把目录索引写入本地 SQLite。日常查询只读本地缓存，不绑定某个存储协议。
 
 GitHub: <https://github.com/YEDEDD/dirspace>
 
@@ -9,8 +9,8 @@ GitHub: <https://github.com/YEDEDD/dirspace>
 需要 Go 1.27+，也可以直接用 Release 中的 Linux 压缩包。
 
 ```bash
-tar xzf dirspace-1.11.0-linux-amd64.tar.gz
-cd dirspace-1.11.0-linux-amd64
+tar xzf dirspace-1.12.0-linux-amd64.tar.gz
+cd dirspace-1.12.0-linux-amd64
 sudo ./scripts/install.sh
 ```
 
@@ -34,6 +34,7 @@ dirspace children --path /mnt/cae365 100
 dirspace size --path /mnt/cae365        # 未命中可加 --exact
 dirspace status --path /mnt
 dirspace monitor --path /mnt
+dirspace diff --path /mnt --since 7d
 ```
 
 `quick`、`scan`、`refresh`、`rebuild` 和 `size --exact` 在终端里会自动转后台；需要等结果加 `--foreground`，脚本/CI 可加 `--background`。`--json` 不自动转后台。
@@ -63,7 +64,7 @@ quick ≈ 目录数 × 2 + 每目录前 16 个文件 + 剩余文件 2%
 有效 QPS ≈ min(配置 QPS, 并发数 / 平均元数据延迟)
 ```
 
-NFS 延迟、自动暂停和属性缓存通常比模式差异更大。quick 跑得比 exact 还慢时，先查 NFS，不要加频率。
+慢元数据延迟、自动暂停和属性缓存通常比模式差异更大。quick 跑得比 exact 还慢时，先查存储延迟和元数据服务，不要加频率。
 
 ## 定时与配置
 
@@ -92,11 +93,13 @@ profile 基线：
 | `normal` | 300 | 8 | 20% |
 | `fast` | 1000 | 16 | 40% |
 
+慢元数据暂停阈值使用通用名 `slow_metadata_latency`、`pause_metadata_latency`、`pause_cooldown`；旧配置里的 `nfs_slow_latency`、`nfs_pause_latency`、`nfs_pause_cooldown` 仍然兼容。
+
 `concurrency: auto` 按一级目录数分配 worker，内部由共享信号量限制总并发。QPS 从上限约 1/3 起步，压力正常时逐步升高。`memory_limit: auto` 优先取 cgroup 上限的 80%，否则取物理内存 10%，范围 256MB–4GB。
 
 目录索引用于 `children` 和 `size`。默认 `index_all_dirs: true`，会保存每个目录的聚合，`children` 能列任意目录的直接子目录，`size` 能查任意深层路径；代价是数据库随目录数增长，`children` 输出也可能很多，建议加数量限制，例如 `dirspace children --path /mnt/a 100`。
 
-如果只想保留每层 top K，把 `index_all_dirs` 设为 `false`，再配合 `index_depth` 和 `index_top_k`。索引不增加 NFS 读取次数，完整扫描成功后原子替换；修改索引配置需要重新扫描才会填充。
+如果只想保留每层 top K，把 `index_all_dirs` 设为 `false`，再配合 `index_depth` 和 `index_top_k`。索引不增加文件系统读取次数，完整扫描成功后原子替换；修改索引配置需要重新扫描才会填充。
 
 ## 常用命令
 
@@ -108,6 +111,7 @@ profile 基线：
 | `dirspace fs-usage --path /mnt` | 文件系统容量，不是目录大小 |
 | `dirspace status` | 当前任务、进度、ETA、QPS、worker、数据库 |
 | `dirspace monitor` | 进程/主机资源和生效配置 |
+| `dirspace diff --since 7d` | 对比同一模式最近两次完成快照，找增长目录 |
 | `dirspace quick` / `scan` | 快速估算 / 精确全量 |
 | `dirspace scan --new` | 只扫新增或失效的一级目录 |
 | `dirspace partial` | 扫描中查看本轮与上次结果的合并视图 |
@@ -115,7 +119,18 @@ profile 基线：
 | `dirspace config explain` | 最终生效配置和自动推导值 |
 | `dirspace daemon` | 常驻调度 quick + exact |
 
-`pause`、`resume`、`cancel`、`refresh`、`rebuild`、`cleanup`、`backup`、`doctor` 等完整命令见 `dirspace --help`。常用参数：`--path`、`--config`、`--db`、`--json`、`--logical`、`--foreground`、`--background`。
+`pause`、`resume`、`cancel`、`refresh`、`rebuild`、`cleanup`、`backup`、`doctor` 等完整命令见 `dirspace --help`。常用参数：`--path`、`--config`、`--db`、`--json`、`--logical`、`--foreground`、`--background`；`diff` 另有 `--since`。
+
+## 增长对比
+
+`diff` 只读本地历史，不重新扫描：
+
+```bash
+dirspace diff --path /mnt --since 7d
+dirspace diff --path /mnt --since 24h --json
+```
+
+它取最近一次完成的 full/quick 快照，再取同一模式在 `--since` 之前最近一次完成快照，按一级目录列出基线和当前值。适合回答“这周哪个项目涨了”。没有同模式基线时会直接报错，不会拿 quick 和 exact 混比；历史受 `retention_days` 限制。
 
 ## 后台、暂停与续扫
 
@@ -140,12 +155,14 @@ dirspace --db /var/lib/dirspace/merged.db --path /mnt \
 ## 限制与安全
 
 - 默认按 `allocated`（`st_blocks × 512`）统计，接近 `du`；`--logical` 使用 `st_size`。
-- exact 每轮遍历全部元数据，没有可靠的 NFS/Lustre 增量；`scan --new` 只看新增或非 fresh 的一级目录，不检查已有目录内部变化。
+- exact 每轮遍历全部元数据，没有可靠的通用增量；`scan --new` 只看新增或非 fresh 的一级目录，不检查已有目录内部变化。
 - quick 的文件数按枚举计数，字节是抽样估算，没有置信区间；小目录通常很准，大目录遇到超大文件漏采会偏差。
 - 硬链接在 exact 根内只计一次，归属目录可能因并发而变化；跨分片硬链接不去重。
 - 共享文件系统客户端有属性缓存，结果不是实时值；删除的目录可能短暂显示 `stale`，随后隐藏并清理。
 - `partial` 是合并视图，不是同一时点的完整快照，不能用于计费或严格趋势对比。
 - 精确、要求低延迟的 500T 级根不适合单机全量，应使用分片或多客户端方案。
+- 成本由文件数、目录数和元数据延迟决定，不是由 TB 数决定；100TB 大文件可能比 10TB 小文件快得多。
+- `allocated` 是客户端看到的分配大小；ZFS 压缩/去重、CephFS 稀疏文件、FUSE 对象网关的物理占用可能不同。
 
 只读与冷数据：
 

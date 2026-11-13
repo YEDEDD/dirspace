@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.11.0"
+var Version = "1.12.0"
 
 const (
 	exitOK      = 0
@@ -65,7 +65,7 @@ func parseCommand(positional []string) (command, error) {
 		}
 		return command{name: name, args: rest}, nil
 	case "list", "partial", "status", "size", "fs-usage", "merge", "monitor", "scan", "quick", "daemon", "refresh", "pause", "resume", "cancel",
-		"cleanup", "backup", "doctor":
+		"cleanup", "backup", "doctor", "diff":
 		if len(rest) > 0 {
 			return command{}, &usageError{fmt.Sprintf("%s 不接受位置参数: %s", name, strings.Join(rest, " "))}
 		}
@@ -97,11 +97,12 @@ func validateCommandOptions(cmd command, opts *options) error {
 	allowRepair := cmd.name == "doctor"
 	allowVacuum := cmd.name == "cleanup"
 	allowDays := cmd.name == "cleanup"
+	allowSince := cmd.name == "diff"
 	allowOutput := cmd.name == "backup"
 	allowFull := cmd.name == "refresh" || cmd.name == "scan"
 	allowNew := cmd.name == "scan"
 	allowResume := cmd.name == "scan"
-	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "children" || cmd.name == "partial" || cmd.name == "status" || cmd.name == "size" || cmd.name == "fs-usage" || cmd.name == "merge" || cmd.name == "monitor" ||
+	allowPath := cmd.name == "top" || cmd.name == "list" || cmd.name == "children" || cmd.name == "partial" || cmd.name == "status" || cmd.name == "size" || cmd.name == "fs-usage" || cmd.name == "merge" || cmd.name == "monitor" || cmd.name == "diff" ||
 		cmd.name == "scan" || cmd.name == "quick" || cmd.name == "refresh" || cmd.name == "rebuild" ||
 		cmd.name == "pause" || cmd.name == "resume" || cmd.name == "cancel"
 	if opts.once && !allowOnce {
@@ -115,6 +116,9 @@ func validateCommandOptions(cmd command, opts *options) error {
 	}
 	if opts.days > 0 && !allowDays {
 		return &usageError{"--days 仅用于 cleanup"}
+	}
+	if opts.sinceSet && !allowSince {
+		return &usageError{"--since 仅用于 diff"}
 	}
 	if opts.output != "" && !allowOutput {
 		return &usageError{"--output 仅用于 backup"}
@@ -521,6 +525,22 @@ func ExecuteContext(parent context.Context, args []string, stdout, stderr io.Wri
 		}
 		return exitOK
 
+	case "diff":
+		view, err := svc.Diff(ctx, queryPath, opts.since)
+		if err != nil {
+			printError(stderr, err)
+			return exitRuntime
+		}
+		if opts.json {
+			if err := writeJSON(stdout, buildDiffJSON(view)); err != nil {
+				fmt.Fprintf(stderr, "输出 JSON 失败: %v\n", err)
+				return exitRuntime
+			}
+		} else {
+			printDiff(stdout, view)
+		}
+		return exitOK
+
 	case "rebuild":
 		setLowPriority(cfg, log)
 		var name string
@@ -693,39 +713,39 @@ func buildConfigJSON(cfg *config.Config) map[string]any {
 		}
 	}
 	return map[string]any{
-		"source":               cfg.Source,
-		"profile":              cfg.Profile,
-		"root_path":            cfg.Scan.RootPath,
-		"database_path":        cfg.Database.Path,
-		"interval":             formatInterval(cfg.Scan.Interval.Duration),
-		"quick_interval":       formatInterval(cfg.Scan.QuickInterval.Duration),
-		"quick_sample_percent": cfg.Scan.QuickSamplePercent,
-		"quick_census_files":   cfg.Scan.QuickCensusFiles,
-		"read_batch_size":      cfg.Scan.ReadBatchSize,
-		"index_depth":          cfg.Scan.IndexDepth,
-		"index_top_k":          cfg.Scan.IndexTopK,
-		"index_all_dirs":       cfg.Scan.IndexAllDirs,
-		"retention_days":       cfg.Database.RetentionDays,
-		"stale_retention_days": cfg.Database.StaleRetentionDays,
-		"concurrency":          cfg.Performance.Concurrency.String(),
-		"concurrency_auto":     cfg.Performance.Concurrency.Auto,
-		"concurrency_max":      cfg.Performance.Concurrency.Limit(),
-		"max_metadata_qps":     cfg.Performance.MaxMetadataQPS,
-		"start_metadata_qps":   startQPS,
-		"min_metadata_qps":     cfg.Performance.MinMetadataQPS,
-		"max_cpu_percent":      cfg.Performance.MaxCPUPercent,
-		"memory_limit":         cfg.Performance.MemoryLimit.Resolve(),
-		"memory_limit_auto":    cfg.Performance.MemoryLimit.Auto,
-		"memory_limit_config":  cfg.Performance.MemoryLimit.String(),
-		"max_host_cpu_percent": cfg.Performance.MaxHostCPUPercent,
-		"max_load1":            cfg.Performance.MaxLoad1,
-		"nfs_slow_latency":     cfg.Performance.NFSSlowLatency.Duration.String(),
-		"nfs_pause_latency":    cfg.Performance.NFSPauseLatency.Duration.String(),
-		"require_mount_point":  cfg.Scan.RequireMountPoint,
-		"is_mount_point":       mountinfo.IsMountPoint(cfg.Scan.RootPath),
-		"is_within_mount":      mountinfo.IsWithinMount(cfg.Scan.RootPath),
-		"mount_type":           mountinfo.FSType(cfg.Scan.RootPath),
-		"mount_server":         mountinfo.Server(cfg.Scan.RootPath),
+		"source":                 cfg.Source,
+		"profile":                cfg.Profile,
+		"root_path":              cfg.Scan.RootPath,
+		"database_path":          cfg.Database.Path,
+		"interval":               formatInterval(cfg.Scan.Interval.Duration),
+		"quick_interval":         formatInterval(cfg.Scan.QuickInterval.Duration),
+		"quick_sample_percent":   cfg.Scan.QuickSamplePercent,
+		"quick_census_files":     cfg.Scan.QuickCensusFiles,
+		"read_batch_size":        cfg.Scan.ReadBatchSize,
+		"index_depth":            cfg.Scan.IndexDepth,
+		"index_top_k":            cfg.Scan.IndexTopK,
+		"index_all_dirs":         cfg.Scan.IndexAllDirs,
+		"retention_days":         cfg.Database.RetentionDays,
+		"stale_retention_days":   cfg.Database.StaleRetentionDays,
+		"concurrency":            cfg.Performance.Concurrency.String(),
+		"concurrency_auto":       cfg.Performance.Concurrency.Auto,
+		"concurrency_max":        cfg.Performance.Concurrency.Limit(),
+		"max_metadata_qps":       cfg.Performance.MaxMetadataQPS,
+		"start_metadata_qps":     startQPS,
+		"min_metadata_qps":       cfg.Performance.MinMetadataQPS,
+		"max_cpu_percent":        cfg.Performance.MaxCPUPercent,
+		"memory_limit":           cfg.Performance.MemoryLimit.Resolve(),
+		"memory_limit_auto":      cfg.Performance.MemoryLimit.Auto,
+		"memory_limit_config":    cfg.Performance.MemoryLimit.String(),
+		"max_host_cpu_percent":   cfg.Performance.MaxHostCPUPercent,
+		"max_load1":              cfg.Performance.MaxLoad1,
+		"slow_metadata_latency":  cfg.Performance.SlowMetadataLatency.Duration.String(),
+		"pause_metadata_latency": cfg.Performance.PauseMetadataLatency.Duration.String(),
+		"require_mount_point":    cfg.Scan.RequireMountPoint,
+		"is_mount_point":         mountinfo.IsMountPoint(cfg.Scan.RootPath),
+		"is_within_mount":        mountinfo.IsWithinMount(cfg.Scan.RootPath),
+		"mount_type":             mountinfo.FSType(cfg.Scan.RootPath),
+		"mount_server":           mountinfo.Source(cfg.Scan.RootPath),
 	}
 }
 
@@ -763,8 +783,8 @@ func printConfig(w io.Writer, cfg *config.Config) {
 		config.FormatBytes(cfg.Performance.MemoryLimit.Resolve()), cfg.Performance.MemoryLimit.String())
 	fmt.Fprintf(w, "主机保护：CPU %g%%，Load1 %g（0 表示关闭）\n",
 		cfg.Performance.MaxHostCPUPercent, cfg.Performance.MaxLoad1)
-	fmt.Fprintf(w, "NFS 延迟：慢 %s，暂停 %s\n",
-		cfg.Performance.NFSSlowLatency.Duration, cfg.Performance.NFSPauseLatency.Duration)
+	fmt.Fprintf(w, "慢元数据延迟：慢 %s，暂停 %s\n",
+		cfg.Performance.SlowMetadataLatency.Duration, cfg.Performance.PauseMetadataLatency.Duration)
 	mountType := mountinfo.FSType(cfg.Scan.RootPath)
 	if mountType == "" {
 		mountType = "未知（根路径未挂载或无 mountinfo）"
@@ -776,11 +796,24 @@ func printConfig(w io.Writer, cfg *config.Config) {
 	mountOK := !cfg.Scan.RequireMountPoint || mountinfo.IsWithinMount(cfg.Scan.RootPath)
 	fmt.Fprintf(w, "挂载保护：%s（require_mount_point=%t，判定=%s）\n",
 		mountGuard, cfg.Scan.RequireMountPoint, map[bool]string{true: "通过", false: "失败"}[mountOK])
-	fmt.Fprintf(w, "挂载类型：%s", mountType)
-	if server := mountinfo.Server(cfg.Scan.RootPath); server != "" {
+	fmt.Fprintf(w, "挂载类型：%s（%s）", mountType, fsClassText(mountinfo.ClassForPath(cfg.Scan.RootPath)))
+	if server := mountinfo.Source(cfg.Scan.RootPath); server != "" {
 		fmt.Fprintf(w, "，服务端：%s", server)
 	}
 	fmt.Fprintln(w)
+}
+
+func fsClassText(class string) string {
+	switch class {
+	case "local":
+		return "本地文件系统"
+	case "network":
+		return "网络/共享文件系统"
+	case "fuse":
+		return "FUSE 文件系统"
+	default:
+		return "未知"
+	}
 }
 
 func formatInterval(d time.Duration) string {
@@ -815,6 +848,7 @@ func printHelp(w io.Writer) {
   top <N>             显示空间排名前 N 个一级目录（默认 10）
   list                显示全部一级目录
   children [N]        显示目录索引中某个目录的直接子目录（--path 指定；N 可选）
+  diff                对比最近两次同模式完成快照（--since 7d）
   size                查询一个目录的已缓存大小；--exact 未命中时精扫该目录
   fs-usage            查询整个挂载点的容量、已用和可用空间（statfs）
   merge               合并多个分片数据库（--db 目标库，--inputs 分片列表）
@@ -839,7 +873,7 @@ func printHelp(w io.Writer) {
 全局参数（可放在命令前后）:
   --path <绝对路径>       查询/扫描/控制的目标路径，默认取配置 scan.root_path
   --config <文件>         配置文件路径
-  --db <文件>             临时覆盖 SQLite 路径（不能位于扫描根目录或 NFS 上）
+  --db <文件>             临时覆盖 SQLite 路径（不能位于扫描根目录或网络/FUSE 上）
   --json                  输出 JSON
   --logical               使用逻辑大小 st_size 展示/统计
   --full                  强制全量（scan/refresh）
@@ -853,6 +887,7 @@ func printHelp(w io.Writer) {
   --inputs <文件列表>     逗号分隔的分片数据库（merge）
   --once                  只运行一轮（daemon）
   --days <N>              清理早于 N 天的历史（cleanup）
+  --since <范围>          diff 对比范围，例如 7d、24h（默认 7d）
   --vacuum                清理后 VACUUM（cleanup）
   --output <文件>         备份目标（backup）
   --repair                重建损坏的数据库（doctor）
@@ -865,6 +900,7 @@ func printHelp(w io.Writer) {
   dirspace top 20
   dirspace list --json
   dirspace children --path /data/cache-a 100
+  dirspace diff --path /mnt --since 7d
   dirspace size --path /data/cache-a
   dirspace size --path /data/cache-a --exact
   dirspace monitor --path /mnt
@@ -888,7 +924,7 @@ func printHelp(w io.Writer) {
   %s
 
 重要:
-  查询命令只读 SQLite，不访问 NFS；扫描只读文件元数据，不读取文件内容。
+  查询命令只读 SQLite，不访问扫描存储；扫描只读文件元数据，不读取文件内容。
 `, Version, config.Default().Database.RetentionDays, config.DefaultProfile,
 		formatInterval(config.Default().Scan.Interval.Duration),
 		formatInterval(config.Default().Scan.QuickInterval.Duration),

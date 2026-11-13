@@ -66,22 +66,44 @@ func InfoForPath(path string) (Mount, bool) {
 	return best, found
 }
 
-// IsNFS reports whether a path resides on an NFS mount.
-func IsNFS(path string) bool {
+// IsNetworkFS reports whether a path resides on a remote or FUSE-backed
+// filesystem. SQLite WAL files must not live there.
+func IsNetworkFS(path string) bool {
 	m, ok := InfoForPath(path)
 	if !ok {
 		return false
 	}
-	fs := strings.ToLower(m.FSType)
-	return strings.HasPrefix(fs, "nfs") || strings.Contains(m.Source, ":")
+	return FSTypeClass(m.FSType) != "local" || strings.Contains(m.Source, ":")
 }
 
-// Server returns the mount source for display, or an empty string.
-func Server(path string) string {
+// Source returns the mount source for display, or an empty string.
+func Source(path string) string {
 	if m, ok := InfoForPath(path); ok {
 		return m.Source
 	}
 	return ""
+}
+
+// FSTypeClass groups a mount type for display and default tuning.
+func FSTypeClass(fsType string) string {
+	fs := strings.ToLower(strings.TrimSpace(fsType))
+	if fs == "" {
+		return "unknown"
+	}
+	if fs == "fuse" || strings.HasPrefix(fs, "fuse.") || fs == "fuseblk" {
+		return "fuse"
+	}
+	for _, prefix := range []string{"nfs", "cifs", "smb", "ceph", "lustre", "gluster", "gpfs", "9p", "afs", "ncp"} {
+		if strings.HasPrefix(fs, prefix) {
+			return "network"
+		}
+	}
+	return "local"
+}
+
+// ClassForPath returns local, network, fuse, or unknown for a path.
+func ClassForPath(path string) string {
+	return FSTypeClass(FSType(path))
 }
 
 // FSType returns the mount filesystem type for display.

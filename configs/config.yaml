@@ -13,7 +13,7 @@ scan:
   root_path: /mnt
   # 快速估算周期；0 关闭 quick。大目录建议不短于一轮扫描耗时。
   quick_interval: 24h
-  # 挂载未就绪时拒绝扫描，避免误扫本地盘；扫普通本地目录时改 false。
+  # 共享挂载未就绪时拒绝扫描，避免误扫本地盘；扫普通本地目录时改 false。
   require_mount_point: true
 
   # 以下 scan 项都可选，默认值见行尾；需要时取消注释。
@@ -53,9 +53,9 @@ scan:
 #   sample_interval: 5s
 #   max_host_cpu_percent: 85       # 0 关闭宿主机 CPU 检查
 #   max_load1: 0                   # 0 关闭宿主机 load 检查
-#   nfs_slow_latency: 1s
-#   nfs_pause_latency: 10s
-#   nfs_pause_cooldown: 30s
+#   slow_metadata_latency: 1s      # 慢元数据阈值；旧名 nfs_slow_latency 仍兼容
+#   pause_metadata_latency: 10s    # 超过后自动暂停；旧名 nfs_pause_latency 仍兼容
+#   pause_cooldown: 30s            # 暂停冷却；旧名 nfs_pause_cooldown 仍兼容
 #   max_metadata_errors: 8
 #   progress_interval: 10s
 #   heartbeat_interval: 5s

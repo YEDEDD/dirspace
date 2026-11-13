@@ -19,7 +19,7 @@ import (
 const (
 	// DefaultConfigPath is the system-wide configuration file used in production.
 	DefaultConfigPath = "/etc/dirspace/config.yaml"
-	// DefaultDBPath is deliberately outside every NFS mount.
+	// DefaultDBPath is deliberately outside every network/FUSE mount.
 	DefaultDBPath = "/var/lib/dirspace/usage.db"
 )
 
@@ -342,8 +342,8 @@ type ScanConfig struct {
 	// unlimited. A capped directory is marked partial and reports a lower bound.
 	QuickMaxFilesPerTop int64 `yaml:"quick_max_files_per_top"`
 	// RequireMountPoint makes a scan fail if RootPath is not a mount target.
-	// It protects against scanning the local root filesystem when an NFS/CFS
-	// mount is missing. Off by default so ordinary local directories still work.
+	// It protects against scanning the local root filesystem when a shared mount
+	// is missing. Off by default so ordinary local directories still work.
 	RequireMountPoint bool `yaml:"require_mount_point"`
 	// ScanOnStart makes the daemon establish a baseline immediately when a root
 	// has never been scanned. Existing roots still wait for their interval.
@@ -353,7 +353,7 @@ type ScanConfig struct {
 	// ResumeInterrupted lets the daemon continue an interrupted full scan.
 	ResumeInterrupted bool `yaml:"resume_interrupted"`
 	// Inventory is experimental. It costs extra local DB writes and does not
-	// remove the need to inspect NFS metadata for every file.
+	// remove the need to inspect filesystem metadata for every file.
 	Inventory InventoryConfig `yaml:"inventory"`
 }
 
@@ -374,14 +374,113 @@ type PerformanceConfig struct {
 	LowPriority      bool        `yaml:"low_priority"`
 	SampleInterval   Duration    `yaml:"sample_interval"`
 	// Host thresholds. Values <= 0 disable the corresponding check.
-	MaxHostCPUPercent float64  `yaml:"max_host_cpu_percent"`
-	MaxLoad1          float64  `yaml:"max_load1"`
-	NFSSlowLatency    Duration `yaml:"nfs_slow_latency"`
-	NFSPauseLatency   Duration `yaml:"nfs_pause_latency"`
-	NFSPauseCooldown  Duration `yaml:"nfs_pause_cooldown"`
-	MaxMetadataErrors int      `yaml:"max_metadata_errors"`
-	ProgressInterval  Duration `yaml:"progress_interval"`
-	HeartbeatInterval Duration `yaml:"heartbeat_interval"`
+	MaxHostCPUPercent    float64  `yaml:"max_host_cpu_percent"`
+	MaxLoad1             float64  `yaml:"max_load1"`
+	SlowMetadataLatency  Duration `yaml:"slow_metadata_latency"`
+	PauseMetadataLatency Duration `yaml:"pause_metadata_latency"`
+	PauseCooldown        Duration `yaml:"pause_cooldown"`
+	MaxMetadataErrors    int      `yaml:"max_metadata_errors"`
+	ProgressInterval     Duration `yaml:"progress_interval"`
+	HeartbeatInterval    Duration `yaml:"heartbeat_interval"`
+}
+
+// performanceYAML decodes both the generic latency keys and the legacy NFS
+// names. Older configuration files keep working while new files stay
+// filesystem-agnostic.
+type performanceYAML struct {
+	Concurrency        Concurrency `yaml:"concurrency"`
+	MaxMetadataQPS     int         `yaml:"max_metadata_qps"`
+	MinMetadataQPS     int         `yaml:"min_metadata_qps"`
+	MaxCPUPercent      int         `yaml:"max_cpu_percent"`
+	MemoryLimit        Bytes       `yaml:"memory_limit"`
+	AdaptiveThrottle   bool        `yaml:"adaptive_throttle"`
+	LowPriority        bool        `yaml:"low_priority"`
+	SampleInterval     Duration    `yaml:"sample_interval"`
+	MaxHostCPUPercent  float64     `yaml:"max_host_cpu_percent"`
+	MaxLoad1           float64     `yaml:"max_load1"`
+	SlowLatency        *Duration   `yaml:"slow_metadata_latency"`
+	PauseLatency       *Duration   `yaml:"pause_metadata_latency"`
+	PauseCooldown      *Duration   `yaml:"pause_cooldown"`
+	LegacySlowLatency  *Duration   `yaml:"nfs_slow_latency"`
+	LegacyPauseLatency *Duration   `yaml:"nfs_pause_latency"`
+	LegacyPauseCool    *Duration   `yaml:"nfs_pause_cooldown"`
+	MaxMetadataErrors  int         `yaml:"max_metadata_errors"`
+	ProgressInterval   Duration    `yaml:"progress_interval"`
+	HeartbeatInterval  Duration    `yaml:"heartbeat_interval"`
+}
+
+// UnmarshalYAML accepts both generic and legacy latency names. Generic names
+// win when both are present.
+func (p *PerformanceConfig) UnmarshalYAML(value *yaml.Node) error {
+	known := map[string]struct{}{
+		"concurrency": {}, "max_metadata_qps": {}, "min_metadata_qps": {},
+		"max_cpu_percent": {}, "memory_limit": {}, "adaptive_throttle": {},
+		"low_priority": {}, "sample_interval": {}, "max_host_cpu_percent": {},
+		"max_load1": {}, "slow_metadata_latency": {}, "pause_metadata_latency": {},
+		"pause_cooldown": {}, "nfs_slow_latency": {}, "nfs_pause_latency": {},
+		"nfs_pause_cooldown": {}, "max_metadata_errors": {}, "progress_interval": {},
+		"heartbeat_interval": {},
+	}
+	if value.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			key := value.Content[i].Value
+			if _, ok := known[key]; !ok {
+				return fmt.Errorf("未知配置项 performance.%s", key)
+			}
+		}
+	}
+	aux := performanceYAML{
+		Concurrency:       p.Concurrency,
+		MaxMetadataQPS:    p.MaxMetadataQPS,
+		MinMetadataQPS:    p.MinMetadataQPS,
+		MaxCPUPercent:     p.MaxCPUPercent,
+		MemoryLimit:       p.MemoryLimit,
+		AdaptiveThrottle:  p.AdaptiveThrottle,
+		LowPriority:       p.LowPriority,
+		SampleInterval:    p.SampleInterval,
+		MaxHostCPUPercent: p.MaxHostCPUPercent,
+		MaxLoad1:          p.MaxLoad1,
+		MaxMetadataErrors: p.MaxMetadataErrors,
+		ProgressInterval:  p.ProgressInterval,
+		HeartbeatInterval: p.HeartbeatInterval,
+	}
+	if err := value.Decode(&aux); err != nil {
+		return err
+	}
+	*p = PerformanceConfig{
+		Concurrency:          aux.Concurrency,
+		MaxMetadataQPS:       aux.MaxMetadataQPS,
+		MinMetadataQPS:       aux.MinMetadataQPS,
+		MaxCPUPercent:        aux.MaxCPUPercent,
+		MemoryLimit:          aux.MemoryLimit,
+		AdaptiveThrottle:     aux.AdaptiveThrottle,
+		LowPriority:          aux.LowPriority,
+		SampleInterval:       aux.SampleInterval,
+		MaxHostCPUPercent:    aux.MaxHostCPUPercent,
+		MaxLoad1:             aux.MaxLoad1,
+		SlowMetadataLatency:  p.SlowMetadataLatency,
+		PauseMetadataLatency: p.PauseMetadataLatency,
+		PauseCooldown:        p.PauseCooldown,
+		MaxMetadataErrors:    aux.MaxMetadataErrors,
+		ProgressInterval:     aux.ProgressInterval,
+		HeartbeatInterval:    aux.HeartbeatInterval,
+	}
+	if aux.SlowLatency != nil {
+		p.SlowMetadataLatency = *aux.SlowLatency
+	} else if aux.LegacySlowLatency != nil {
+		p.SlowMetadataLatency = *aux.LegacySlowLatency
+	}
+	if aux.PauseLatency != nil {
+		p.PauseMetadataLatency = *aux.PauseLatency
+	} else if aux.LegacyPauseLatency != nil {
+		p.PauseMetadataLatency = *aux.LegacyPauseLatency
+	}
+	if aux.PauseCooldown != nil {
+		p.PauseCooldown = *aux.PauseCooldown
+	} else if aux.LegacyPauseCool != nil {
+		p.PauseCooldown = *aux.LegacyPauseCool
+	}
+	return nil
 }
 
 type LoggingConfig struct {
@@ -457,22 +556,22 @@ func DefaultForProfile(name string) *Config {
 			},
 		},
 		Performance: PerformanceConfig{
-			Concurrency:       Concurrency{Auto: true, Max: 8},
-			MaxMetadataQPS:    300,
-			MinMetadataQPS:    30,
-			MaxCPUPercent:     20,
-			MemoryLimit:       Bytes{Auto: true},
-			AdaptiveThrottle:  true,
-			LowPriority:       true,
-			SampleInterval:    Duration{5 * time.Second},
-			MaxHostCPUPercent: 85,
-			MaxLoad1:          0,
-			NFSSlowLatency:    Duration{500 * time.Millisecond},
-			NFSPauseLatency:   Duration{5 * time.Second},
-			NFSPauseCooldown:  Duration{30 * time.Second},
-			MaxMetadataErrors: 8,
-			ProgressInterval:  Duration{10 * time.Second},
-			HeartbeatInterval: Duration{5 * time.Second},
+			Concurrency:          Concurrency{Auto: true, Max: 8},
+			MaxMetadataQPS:       300,
+			MinMetadataQPS:       30,
+			MaxCPUPercent:        20,
+			MemoryLimit:          Bytes{Auto: true},
+			AdaptiveThrottle:     true,
+			LowPriority:          true,
+			SampleInterval:       Duration{5 * time.Second},
+			MaxHostCPUPercent:    85,
+			MaxLoad1:             0,
+			SlowMetadataLatency:  Duration{500 * time.Millisecond},
+			PauseMetadataLatency: Duration{5 * time.Second},
+			PauseCooldown:        Duration{30 * time.Second},
+			MaxMetadataErrors:    8,
+			ProgressInterval:     Duration{10 * time.Second},
+			HeartbeatInterval:    Duration{5 * time.Second},
 		},
 		Logging: LoggingConfig{Level: "info", Format: "text"},
 	}
@@ -489,8 +588,8 @@ func DefaultForProfile(name string) *Config {
 		cfg.Performance.MinMetadataQPS = 100
 		cfg.Performance.MaxCPUPercent = 40
 		cfg.Performance.MemoryLimit = Bytes{Auto: true}
-		cfg.Performance.NFSSlowLatency = Duration{time.Second}
-		cfg.Performance.NFSPauseLatency = Duration{10 * time.Second}
+		cfg.Performance.SlowMetadataLatency = Duration{time.Second}
+		cfg.Performance.PauseMetadataLatency = Duration{10 * time.Second}
 	}
 	return cfg
 }
@@ -708,14 +807,14 @@ func (c *Config) Validate() error {
 	if p.SampleInterval.Duration < time.Second {
 		return errors.New("performance.sample_interval 不能小于 1s")
 	}
-	if p.NFSSlowLatency.Duration < 0 || p.NFSPauseLatency.Duration < 0 {
-		return errors.New("performance.nfs_slow_latency/nfs_pause_latency 不能为负数")
+	if p.SlowMetadataLatency.Duration < 0 || p.PauseMetadataLatency.Duration < 0 {
+		return errors.New("performance.slow_metadata_latency/pause_metadata_latency 不能为负数")
 	}
-	if p.NFSPauseLatency.Duration <= p.NFSSlowLatency.Duration {
-		return errors.New("performance.nfs_pause_latency 必须大于 nfs_slow_latency")
+	if p.PauseMetadataLatency.Duration <= p.SlowMetadataLatency.Duration {
+		return errors.New("performance.pause_metadata_latency 必须大于 slow_metadata_latency")
 	}
-	if p.NFSPauseCooldown.Duration < time.Second {
-		return errors.New("performance.nfs_pause_cooldown 不能小于 1s")
+	if p.PauseCooldown.Duration < time.Second {
+		return errors.New("performance.pause_cooldown 不能小于 1s")
 	}
 	if p.ProgressInterval.Duration < time.Second {
 		return errors.New("performance.progress_interval 不能小于 1s")
@@ -738,8 +837,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("数据库不能位于扫描根目录内: db=%s root=%s", c.Database.Path, r)
 		}
 	}
-	if mountinfo.IsNFS(c.Database.Path) {
-		return fmt.Errorf("数据库不能位于 NFS 挂载目录: %s", c.Database.Path)
+	if mountinfo.IsNetworkFS(c.Database.Path) {
+		return fmt.Errorf("数据库不能位于网络或 FUSE 挂载目录: %s", c.Database.Path)
 	}
 	switch strings.ToLower(c.Logging.Level) {
 	case "debug", "info", "warn", "warning", "error":

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -566,6 +567,108 @@ func (s *Store) LastRun(ctx context.Context, rootID int64) (*model.Run, error) {
 		return nil, ErrNotFound
 	}
 	return run, err
+}
+
+// HistoryPoint is one top-level directory value in a completed run.
+type HistoryPoint struct {
+	AllocBytes   int64
+	LogicalBytes int64
+	FileCount    int64
+	Accuracy     string
+}
+
+// HistoryDiffRow compares one top-level directory between two completed runs.
+type HistoryDiffRow struct {
+	Name    string
+	Base    HistoryPoint
+	Head    HistoryPoint
+	HasBase bool
+	HasHead bool
+}
+
+// HistoryDiff returns the newest completed full/quick run and the newest
+// completed run of the same mode at or before cutoff. It only uses cached
+// history; it never touches the scanned filesystem.
+func (s *Store) HistoryDiff(ctx context.Context, rootID int64, cutoff time.Time) (base, head *model.Run, rows []HistoryDiffRow, err error) {
+	queryRun := func(where string, args ...any) (*model.Run, error) {
+		q := `SELECT ` + runColumns + `
+			FROM scan_runs r JOIN roots ON roots.id=r.root_id
+			WHERE r.root_id=? AND r.status=? AND r.mode IN (?,?)
+			  AND r.finished_at IS NOT NULL ` + where + `
+			ORDER BY r.finished_at DESC, r.id DESC LIMIT 1`
+		all := append([]any{rootID, string(model.RunCompleted), string(model.ModeFull), string(model.ModeQuick)}, args...)
+		run, scanErr := scanRun(s.rdb.QueryRowContext(ctx, q, all...))
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return run, scanErr
+	}
+	head, err = queryRun("")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if head.FinishedAt == nil {
+		return nil, head, nil, ErrNotFound
+	}
+	if !head.FinishedAt.After(cutoff) {
+		return nil, head, nil, ErrNotFound
+	}
+	base, err = queryRun("AND r.finished_at <= ? AND r.mode = ?", toMillis(cutoff), string(head.Mode))
+	if err != nil {
+		return nil, head, nil, err
+	}
+	load := func(runID int64) (map[string]HistoryPoint, error) {
+		rows, queryErr := s.rdb.QueryContext(ctx, `SELECT name, alloc_bytes, logical_bytes, file_count, accuracy
+			FROM dir_history WHERE run_id=?`, runID)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		defer rows.Close()
+		out := make(map[string]HistoryPoint)
+		for rows.Next() {
+			var name string
+			var p HistoryPoint
+			if scanErr := rows.Scan(&name, &p.AllocBytes, &p.LogicalBytes, &p.FileCount, &p.Accuracy); scanErr != nil {
+				return nil, scanErr
+			}
+			out[name] = p
+		}
+		return out, rows.Err()
+	}
+	baseRows, err := load(base.ID)
+	if err != nil {
+		return nil, head, nil, err
+	}
+	headRows, err := load(head.ID)
+	if err != nil {
+		return nil, head, nil, err
+	}
+	seen := make(map[string]struct{}, len(baseRows)+len(headRows))
+	for name := range baseRows {
+		seen[name] = struct{}{}
+	}
+	for name := range headRows {
+		seen[name] = struct{}{}
+	}
+	for name := range seen {
+		b, hasBase := baseRows[name]
+		h, hasHead := headRows[name]
+		rows = append(rows, HistoryDiffRow{Name: name, Base: b, Head: h, HasBase: hasBase, HasHead: hasHead})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		left, right := rows[i].Head.AllocBytes, rows[j].Head.AllocBytes
+		if !rows[i].HasHead {
+			left = rows[i].Base.AllocBytes
+		}
+		if !rows[j].HasHead {
+			right = rows[j].Base.AllocBytes
+		}
+		if left != right {
+			return left > right
+		}
+		return rows[i].Name < rows[j].Name
+	})
+	return base, head, rows, nil
 }
 
 // SetTotalDirs records how many first-level entries this run will inspect.

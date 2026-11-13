@@ -738,3 +738,41 @@ func TestPartialInterruptedStale(t *testing.T) {
 		t.Fatal("unknown finish time should not be treated as stale")
 	}
 }
+
+func TestDiffComparesCompletedSnapshots(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	first, err := f.svc.Scan(context.Background(), root, ScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", f.cfg.Database.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE scan_runs SET finished_at=? WHERE id=?`,
+		time.Now().Add(-2*time.Hour).UnixMilli(), first.RunID); err != nil {
+		t.Fatal(err)
+	}
+
+	mkFile(t, filepath.Join(root, "alpha", "b"), 4096)
+	second, err := f.svc.Scan(context.Background(), root, ScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := f.svc.Diff(context.Background(), root, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Base == nil || view.Base.ID != first.RunID || view.Head == nil || view.Head.ID != second.RunID {
+		t.Fatalf("unexpected runs: base=%+v head=%+v", view.Base, view.Head)
+	}
+	if len(view.Rows) != 1 || view.Rows[0].Name != "alpha" {
+		t.Fatalf("rows: %+v", view.Rows)
+	}
+	if view.Rows[0].Head.AllocBytes <= view.Rows[0].Base.AllocBytes {
+		t.Fatalf("growth not detected: %+v", view.Rows[0])
+	}
+}

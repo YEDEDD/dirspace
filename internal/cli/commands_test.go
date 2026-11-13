@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/YEDEDD/dirspace/internal/model"
 	"github.com/YEDEDD/dirspace/internal/storage"
@@ -390,5 +391,36 @@ func TestAssessMonitorStaleRunLimit(t *testing.T) {
 	}
 	if len(v.Reasons) == 0 || !strings.Contains(v.Reasons[0], "启动时限速") {
 		t.Fatalf("missing stale-limit reason: %+v", v)
+	}
+}
+
+func TestParseSinceAndDiffOptions(t *testing.T) {
+	opts, err := parseArgs([]string{"diff", "--since", "7d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.since != 7*24*time.Hour || !opts.sinceSet {
+		t.Fatalf("since=%v set=%v", opts.since, opts.sinceSet)
+	}
+	cmd, err := parseCommand(opts.positional)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCommandOptions(cmd, opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseArgs([]string{"diff", "--since", "nonsense"}); err == nil {
+		t.Fatal("invalid since accepted")
+	}
+	opts, err = parseArgs([]string{"top", "--since", "1d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, err = parseCommand(opts.positional)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCommandOptions(cmd, opts); err == nil {
+		t.Fatal("--since accepted for top")
 	}
 }

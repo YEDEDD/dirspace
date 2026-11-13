@@ -126,6 +126,13 @@ func TestUnknownFieldRejected(t *testing.T) {
 	if _, err := Load(path); err == nil {
 		t.Fatal("unknown field accepted")
 	}
+	path = filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("performance:\n  typo_qps: 10\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("unknown performance field accepted")
+	}
 }
 
 func TestProfilesAndOverrides(t *testing.T) {
@@ -161,6 +168,26 @@ func TestProfilesAndOverrides(t *testing.T) {
 	}
 	if !cfg.Performance.Concurrency.Auto || cfg.Performance.Concurrency.Max != 16 {
 		t.Fatalf("fast auto concurrency: %+v", cfg.Performance.Concurrency)
+	}
+
+	cfg, err = Load(write(baseYAML + "profile: normal\nperformance:\n  slow_metadata_latency: 2s\n  pause_metadata_latency: 20s\n  pause_cooldown: 45s\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Performance.SlowMetadataLatency.Duration != 2*time.Second ||
+		cfg.Performance.PauseMetadataLatency.Duration != 20*time.Second ||
+		cfg.Performance.PauseCooldown.Duration != 45*time.Second {
+		t.Fatalf("generic latency keys: %+v", cfg.Performance)
+	}
+
+	cfg, err = Load(write(baseYAML + "profile: normal\nperformance:\n  nfs_slow_latency: 3s\n  nfs_pause_latency: 30s\n  nfs_pause_cooldown: 50s\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Performance.SlowMetadataLatency.Duration != 3*time.Second ||
+		cfg.Performance.PauseMetadataLatency.Duration != 30*time.Second ||
+		cfg.Performance.PauseCooldown.Duration != 50*time.Second {
+		t.Fatalf("legacy latency keys: %+v", cfg.Performance)
 	}
 
 	cfg, err = Load(write(baseYAML + "profile: normal\nperformance:\n  concurrency: 3\n"))

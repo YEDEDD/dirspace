@@ -26,16 +26,16 @@ type monitorReport struct {
 }
 
 type monitorConfig struct {
-	Concurrency       string  `json:"concurrency"`
-	ConcurrencyMax    int     `json:"concurrency_max"`
-	MaxMetadataQPS    int     `json:"max_metadata_qps"`
-	MaxCPUPercent     int     `json:"max_cpu_percent"`
-	MemoryLimit       int64   `json:"memory_limit"`
-	MemoryLimitAuto   bool    `json:"memory_limit_auto"`
-	MaxHostCPUPercent float64 `json:"max_host_cpu_percent"`
-	MaxLoad1          float64 `json:"max_load1"`
-	NFSSlowLatencyMS  int64   `json:"nfs_slow_latency_ms"`
-	NFSPauseLatencyMS int64   `json:"nfs_pause_latency_ms"`
+	Concurrency            string  `json:"concurrency"`
+	ConcurrencyMax         int     `json:"concurrency_max"`
+	MaxMetadataQPS         int     `json:"max_metadata_qps"`
+	MaxCPUPercent          int     `json:"max_cpu_percent"`
+	MemoryLimit            int64   `json:"memory_limit"`
+	MemoryLimitAuto        bool    `json:"memory_limit_auto"`
+	MaxHostCPUPercent      float64 `json:"max_host_cpu_percent"`
+	MaxLoad1               float64 `json:"max_load1"`
+	SlowMetadataLatencyMS  int64   `json:"slow_metadata_latency_ms"`
+	PauseMetadataLatencyMS int64   `json:"pause_metadata_latency_ms"`
 }
 
 type monitorRuntime struct {
@@ -75,16 +75,16 @@ func monitorCommand(ctx context.Context, cfg *config.Config, path string, status
 		Path: path,
 		Unit: monitorUnit(),
 		Config: monitorConfig{
-			Concurrency:       cfg.Performance.Concurrency.String(),
-			ConcurrencyMax:    cfg.Performance.Concurrency.Limit(),
-			MaxMetadataQPS:    cfg.Performance.MaxMetadataQPS,
-			MaxCPUPercent:     cfg.Performance.MaxCPUPercent,
-			MemoryLimit:       cfg.Performance.MemoryLimit.Resolve(),
-			MemoryLimitAuto:   cfg.Performance.MemoryLimit.Auto,
-			MaxHostCPUPercent: cfg.Performance.MaxHostCPUPercent,
-			MaxLoad1:          cfg.Performance.MaxLoad1,
-			NFSSlowLatencyMS:  cfg.Performance.NFSSlowLatency.Duration.Milliseconds(),
-			NFSPauseLatencyMS: cfg.Performance.NFSPauseLatency.Duration.Milliseconds(),
+			Concurrency:            cfg.Performance.Concurrency.String(),
+			ConcurrencyMax:         cfg.Performance.Concurrency.Limit(),
+			MaxMetadataQPS:         cfg.Performance.MaxMetadataQPS,
+			MaxCPUPercent:          cfg.Performance.MaxCPUPercent,
+			MemoryLimit:            cfg.Performance.MemoryLimit.Resolve(),
+			MemoryLimitAuto:        cfg.Performance.MemoryLimit.Auto,
+			MaxHostCPUPercent:      cfg.Performance.MaxHostCPUPercent,
+			MaxLoad1:               cfg.Performance.MaxLoad1,
+			SlowMetadataLatencyMS:  cfg.Performance.SlowMetadataLatency.Duration.Milliseconds(),
+			PauseMetadataLatencyMS: cfg.Performance.PauseMetadataLatency.Duration.Milliseconds(),
 		},
 	}
 	props := readSystemdProperties(ctx, report.Unit)
@@ -454,7 +454,7 @@ func assessMonitor(r monitorReport) monitorVerdict {
 	if high {
 		v.Level = "high"
 		v.Summary = "配置可能偏高，当前主机/内存压力较大"
-		v.Suggestions = append(v.Suggestions, "优先降低 max_metadata_qps、concurrency 或 CPU 上限；观察 NFS 延迟和业务侧体验")
+		v.Suggestions = append(v.Suggestions, "优先降低 max_metadata_qps、concurrency 或 CPU 上限；观察慢元数据延迟和业务侧体验")
 	}
 	if low && !high {
 		v.Level = "low"
@@ -470,7 +470,7 @@ func assessMonitor(r monitorReport) monitorVerdict {
 		v.Summary = "当前配置基本合适"
 	}
 	if len(v.Reasons) == 0 {
-		v.Reasons = append(v.Reasons, "关键指标未触发高低阈值；继续观察 NFS 延迟和主机负载")
+		v.Reasons = append(v.Reasons, "关键指标未触发高低阈值；继续观察慢元数据延迟和主机负载")
 	}
 	return v
 }
@@ -505,7 +505,7 @@ func printMonitor(w io.Writer, r monitorReport) {
 	} else if r.Config.MaxLoad1 > 0 {
 		fmt.Fprintf(w, "  Load1 保护：%.2f\n", r.Config.MaxLoad1)
 	}
-	fmt.Fprintf(w, "  NFS：慢 %dms，暂停 %dms\n\n", r.Config.NFSSlowLatencyMS, r.Config.NFSPauseLatencyMS)
+	fmt.Fprintf(w, "  慢元数据延迟：慢 %dms，暂停 %dms\n\n", r.Config.SlowMetadataLatencyMS, r.Config.PauseMetadataLatencyMS)
 
 	fmt.Fprintln(w, "运行")
 	fmt.Fprintf(w, "  进程 CPU：%.1f%%", r.Runtime.ProcessCPUPercent)
@@ -564,7 +564,7 @@ func printMonitor(w io.Writer, r monitorReport) {
 	for _, suggestion := range r.Assessment.Suggestions {
 		fmt.Fprintf(w, "  建议：%s\n", suggestion)
 	}
-	fmt.Fprintln(w, "  提示：NFS 服务端延迟请配合 nfsiostat 5 / nfsstat -c 观察。")
+	fmt.Fprintln(w, "  提示：共享存储元数据延迟请结合存储侧监控；NFS 可配合 nfsiostat 5 / nfsstat -c。")
 }
 
 func autoLabel(auto bool) string {

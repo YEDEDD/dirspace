@@ -280,7 +280,7 @@ func printQuery(w io.Writer, svc *service.Service, view *service.View) {
 			fmt.Fprintln(w, "暂无一级目录统计。若尚未扫描，请先执行：dirspace scan")
 		}
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, "说明：统计结果为客户端元数据快照，不代表 NFS 服务端实时占用。")
+		fmt.Fprintln(w, "说明：统计结果为客户端元数据快照，不代表存储服务端实时占用。")
 		return
 	}
 
@@ -323,7 +323,7 @@ func printQuery(w io.Writer, svc *service.Service, view *service.View) {
 			status)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "说明：空间为客户端按元数据汇总的估算值，不代表 NFS 服务端实时占用；")
+	fmt.Fprintln(w, "说明：空间为客户端按元数据汇总的估算值，不代表存储服务端实时占用；")
 	fmt.Fprintln(w, "      扫描期间文件可能新增、删除或改变大小，准确性以“数据状态”与“准确性”为准。")
 }
 
@@ -335,7 +335,7 @@ func serverText(server, fsType string) string {
 		return fmt.Sprintf("%s（%s）", server, fsType)
 	}
 	if fsType != "" {
-		return "本地或非 NFS 文件系统（" + fsType + "）"
+		return "本地或共享文件系统（" + fsType + "）"
 	}
 	return "未检测到挂载信息"
 }
