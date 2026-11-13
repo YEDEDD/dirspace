@@ -170,6 +170,14 @@ func TestProfilesAndOverrides(t *testing.T) {
 		t.Fatalf("fast auto concurrency: %+v", cfg.Performance.Concurrency)
 	}
 
+	cfg, err = Load(write(baseYAML + "profile: auto\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Profile != "auto" {
+		t.Fatalf("auto profile: %q", cfg.Profile)
+	}
+
 	cfg, err = Load(write(baseYAML + "profile: normal\nperformance:\n  slow_metadata_latency: 2s\n  pause_metadata_latency: 20s\n  pause_cooldown: 45s\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -267,5 +275,30 @@ func TestAutoMemoryLimit(t *testing.T) {
 		if got := autoMemoryLimit(tc.cgroup, tc.total); got != tc.want {
 			t.Fatalf("autoMemoryLimit(%d,%d)=%d want %d", tc.cgroup, tc.total, got, tc.want)
 		}
+	}
+}
+
+func TestAutoProfileUsesFilesystemClass(t *testing.T) {
+	cfg := DefaultForProfile("auto")
+	cfg.applyAutoProfileForClass("local")
+	if cfg.Performance.MaxMetadataQPS != 4000 || cfg.Performance.Concurrency.Max != 16 {
+		t.Fatalf("local auto profile: %+v", cfg.Performance)
+	}
+	cfg = DefaultForProfile("auto")
+	cfg.applyAutoProfileForClass("network")
+	if cfg.Performance.MaxMetadataQPS != 1000 || cfg.Performance.Concurrency.Max != 16 {
+		t.Fatalf("network auto profile: %+v", cfg.Performance)
+	}
+	cfg = DefaultForProfile("auto")
+	cfg.applyAutoProfileForClass("fuse")
+	if cfg.Performance.MaxMetadataQPS != 300 || cfg.Performance.Concurrency.Max != 8 {
+		t.Fatalf("fuse auto profile: %+v", cfg.Performance)
+	}
+	cfg = DefaultForProfile("auto")
+	cfg.Performance.explicit = map[string]bool{"max_metadata_qps": true}
+	cfg.Performance.MaxMetadataQPS = 123
+	cfg.applyAutoProfileForClass("local")
+	if cfg.Performance.MaxMetadataQPS != 123 {
+		t.Fatalf("explicit override lost: %+v", cfg.Performance)
 	}
 }

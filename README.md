@@ -9,8 +9,8 @@ GitHub: <https://github.com/YEDEDD/dirspace>
 需要 Go 1.27+，也可以直接用 Release 中的 Linux 压缩包。
 
 ```bash
-tar xzf dirspace-1.12.0-linux-amd64.tar.gz
-cd dirspace-1.12.0-linux-amd64
+tar xzf dirspace-1.13.0-linux-amd64.tar.gz
+cd dirspace-1.13.0-linux-amd64
 sudo ./scripts/install.sh
 ```
 
@@ -73,7 +73,7 @@ quick ≈ 目录数 × 2 + 每目录前 16 个文件 + 剩余文件 2%
 最小配置：
 
 ```yaml
-profile: fast
+profile: auto
 
 scan:
   root_path: /mnt
@@ -92,6 +92,9 @@ profile 基线：
 | `low` | 100 | 4 | 10% |
 | `normal` | 300 | 8 | 20% |
 | `fast` | 1000 | 16 | 40% |
+| `auto` | 本地 4000 / 共享 1000 / FUSE 300 | 本地 16 / 共享 16 / FUSE 8 | 本 60% / 共 40% / FUSE 20% |
+
+`profile: auto` 按扫描根所在文件系统选择基线：本地盘 QPS 4000、共享盘 QPS 1000、FUSE QPS 300；`performance` 里显式写的键仍然覆盖自动值。已有配置如果写的是 `fast`，安装脚本会保留，不会自动改成 `auto`。
 
 慢元数据暂停阈值使用通用名 `slow_metadata_latency`、`pause_metadata_latency`、`pause_cooldown`；旧配置里的 `nfs_slow_latency`、`nfs_pause_latency`、`nfs_pause_cooldown` 仍然兼容。
 

@@ -382,6 +382,7 @@ type PerformanceConfig struct {
 	MaxMetadataErrors    int      `yaml:"max_metadata_errors"`
 	ProgressInterval     Duration `yaml:"progress_interval"`
 	HeartbeatInterval    Duration `yaml:"heartbeat_interval"`
+	explicit             map[string]bool
 }
 
 // performanceYAML decodes both the generic latency keys and the legacy NFS
@@ -421,12 +422,21 @@ func (p *PerformanceConfig) UnmarshalYAML(value *yaml.Node) error {
 		"nfs_pause_cooldown": {}, "max_metadata_errors": {}, "progress_interval": {},
 		"heartbeat_interval": {},
 	}
+	explicit := make(map[string]bool)
 	if value.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(value.Content); i += 2 {
 			key := value.Content[i].Value
 			if _, ok := known[key]; !ok {
 				return fmt.Errorf("未知配置项 performance.%s", key)
 			}
+			if key == "nfs_slow_latency" {
+				key = "slow_metadata_latency"
+			} else if key == "nfs_pause_latency" {
+				key = "pause_metadata_latency"
+			} else if key == "nfs_pause_cooldown" {
+				key = "pause_cooldown"
+			}
+			explicit[key] = true
 		}
 	}
 	aux := performanceYAML{
@@ -508,6 +518,8 @@ func normalizeProfile(name string) string {
 		return "low"
 	case "fast":
 		return "fast"
+	case "auto":
+		return "auto"
 	case "", "normal":
 		return DefaultProfile
 	default:
@@ -519,9 +531,11 @@ func normalizeProfile(name string) string {
 // conservative or throughput-oriented baseline.
 func Default() *Config { return DefaultForProfile(DefaultProfile) }
 
-// DefaultForProfile returns the baseline for low, normal, or fast.
+// DefaultForProfile returns the baseline for low, normal, fast, or auto.
 // Individual YAML values are decoded over this baseline, so advanced users can
-// override any field without losing the rest of the profile.
+// override any field without losing the rest of the profile. The auto profile
+// starts from normal and is resolved against the scan root filesystem during
+// validation.
 func DefaultForProfile(name string) *Config {
 	profile := normalizeProfile(name)
 	if profile == "" {
@@ -594,6 +608,50 @@ func DefaultForProfile(name string) *Config {
 	return cfg
 }
 
+// applyAutoProfile fills unset performance fields from the scan root's
+// filesystem class. Explicit YAML values always win.
+func (c *Config) applyAutoProfile() {
+	c.applyAutoProfileForClass(mountinfo.ClassForPath(c.Scan.RootPath))
+}
+
+func (c *Config) applyAutoProfileForClass(class string) {
+	if c.Profile != "auto" {
+		return
+	}
+	p := &c.Performance
+	set := func(key string, fn func()) {
+		if !p.explicit[key] {
+			fn()
+		}
+	}
+	switch class {
+	case "local":
+		set("concurrency", func() { p.Concurrency = Concurrency{Auto: true, Max: 16} })
+		set("max_metadata_qps", func() { p.MaxMetadataQPS = 4000 })
+		set("min_metadata_qps", func() { p.MinMetadataQPS = 400 })
+		set("max_cpu_percent", func() { p.MaxCPUPercent = 60 })
+		set("slow_metadata_latency", func() { p.SlowMetadataLatency = Duration{time.Second} })
+		set("pause_metadata_latency", func() { p.PauseMetadataLatency = Duration{10 * time.Second} })
+		set("pause_cooldown", func() { p.PauseCooldown = Duration{30 * time.Second} })
+	case "network":
+		set("concurrency", func() { p.Concurrency = Concurrency{Auto: true, Max: 16} })
+		set("max_metadata_qps", func() { p.MaxMetadataQPS = 1000 })
+		set("min_metadata_qps", func() { p.MinMetadataQPS = 100 })
+		set("max_cpu_percent", func() { p.MaxCPUPercent = 40 })
+		set("slow_metadata_latency", func() { p.SlowMetadataLatency = Duration{time.Second} })
+		set("pause_metadata_latency", func() { p.PauseMetadataLatency = Duration{10 * time.Second} })
+		set("pause_cooldown", func() { p.PauseCooldown = Duration{30 * time.Second} })
+	case "fuse":
+		set("concurrency", func() { p.Concurrency = Concurrency{Auto: true, Max: 8} })
+		set("max_metadata_qps", func() { p.MaxMetadataQPS = 300 })
+		set("min_metadata_qps", func() { p.MinMetadataQPS = 30 })
+		set("max_cpu_percent", func() { p.MaxCPUPercent = 20 })
+		set("slow_metadata_latency", func() { p.SlowMetadataLatency = Duration{2 * time.Second} })
+		set("pause_metadata_latency", func() { p.PauseMetadataLatency = Duration{20 * time.Second} })
+		set("pause_cooldown", func() { p.PauseCooldown = Duration{30 * time.Second} })
+	}
+}
+
 // ResolvePath finds the configuration file to use.
 // Explicit path must exist. Otherwise DIRSPACE_CONFIG, /etc/..., then
 // ./configs/config.yaml are tried. An empty result means "use defaults".
@@ -653,7 +711,7 @@ func Load(path string) (*Config, error) {
 		if strings.TrimSpace(head.Profile) != "" {
 			profile := normalizeProfile(head.Profile)
 			if profile == "" {
-				return nil, fmt.Errorf("profile 非法: %s（可选 low、normal、fast）", head.Profile)
+				return nil, fmt.Errorf("profile 非法: %s（可选 low、normal、fast、auto）", head.Profile)
 			}
 			cfg = DefaultForProfile(profile)
 		}
@@ -779,9 +837,10 @@ func (c *Config) Validate() error {
 
 	profile := normalizeProfile(c.Profile)
 	if profile == "" {
-		return fmt.Errorf("profile 非法: %s（可选 low、normal、fast）", c.Profile)
+		return fmt.Errorf("profile 非法: %s（可选 low、normal、fast、auto）", c.Profile)
 	}
 	c.Profile = profile
+	c.applyAutoProfile()
 
 	p := &c.Performance
 	if p.Concurrency.Max < 1 || p.Concurrency.Max > 64 {

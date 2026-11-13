@@ -4,10 +4,11 @@
 # profile 是基线，performance 下的同名项会覆盖它。
 #
 # profile:
+#   auto   按扫描根文件系统自动选择（推荐）：本地 QPS 4000，共享 QPS 1000，FUSE QPS 300
 #   low    生产优先：QPS 100，worker 4，CPU 10%
 #   normal 默认：QPS 300，worker 8，CPU 20%
 #   fast   维护窗口：QPS 1000，worker 16，CPU 40%
-profile: fast
+profile: auto
 
 scan:
   root_path: /mnt
