@@ -295,11 +295,17 @@ func (s *Service) Children(ctx context.Context, path string, limit int) (*IndexC
 		}
 	}
 	active, _ := s.Store.ActiveRun(ctx, root.ID)
+	liveRun := active
+	if liveRun == nil {
+		if last, lastErr := s.Store.LastRun(ctx, root.ID); lastErr == nil && last.Status == model.RunCompleted {
+			liveRun = last
+		}
+	}
 	var parent *model.DirIndexEntry
 	if rel != "" {
 		entry, getErr := s.Store.GetIndexEntry(ctx, root.ID, rel)
-		if errors.Is(getErr, storage.ErrNotFound) && active != nil {
-			entry, getErr = s.Store.GetLiveIndexEntry(ctx, active.ID, rel)
+		if errors.Is(getErr, storage.ErrNotFound) && liveRun != nil {
+			entry, getErr = s.Store.GetLiveIndexEntry(ctx, liveRun.ID, rel)
 		}
 		if getErr != nil {
 			if errors.Is(getErr, storage.ErrNotFound) {
@@ -334,26 +340,24 @@ func (s *Service) Children(ctx context.Context, path string, limit int) (*IndexC
 				})
 			}
 		}
-		// The live index rows for the root itself describe completed
-		// subdirectories; the root's first-level aggregate is still being
-		// scanned, so keep the StagedProgressDirs row (InProgress=true) for
-		// rel=="" instead of overriding it with a completed-looking row.
-		var liveChildren []model.DirIndexEntry
-		if rel != "" {
-			liveChildren, liveErr = s.Store.LiveChildren(ctx, active.ID, rel, limit, s.sizeBasis())
-		}
-		if liveErr == nil && len(liveChildren) > 0 {
-			byPath := make(map[string]int, len(dirs))
-			for i := range dirs {
-				byPath[dirs[i].Path] = i
-			}
-			for i := range liveChildren {
-				e := liveChildren[i]
-				e.RootID = root.ID
-				if idx, ok := byPath[e.Path]; ok {
-					dirs[idx] = e
-				} else {
-					dirs = append(dirs, e)
+	}
+	if liveRun != nil {
+		useLiveChildren := (active != nil && rel != "") || (active == nil && (rel != "" || len(dirs) == 0))
+		if useLiveChildren {
+			liveChildren, liveErr := s.Store.LiveChildren(ctx, liveRun.ID, rel, limit, s.sizeBasis())
+			if liveErr == nil && len(liveChildren) > 0 {
+				byPath := make(map[string]int, len(dirs))
+				for i := range dirs {
+					byPath[dirs[i].Path] = i
+				}
+				for i := range liveChildren {
+					e := liveChildren[i]
+					e.RootID = root.ID
+					if idx, ok := byPath[e.Path]; ok {
+						dirs[idx] = e
+					} else {
+						dirs = append(dirs, e)
+					}
 				}
 			}
 		}
