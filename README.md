@@ -110,7 +110,7 @@ profile 基线：
 - `slow_metadata_latency`、`pause_metadata_latency`、`pause_cooldown`
 - `max_metadata_errors`、`memory_limit`
 
-日志会打印 `检测到配置变更，已热更新运行中的扫描`，`status` 的 QPS 上限也会同步更新。`status` 的当前目录会显示每个一级目录正在处理的并发任务数，例如 `beegfs_meta×8, beegfs_storage×4`；活跃 worker 总数也会单独显示。
+日志会打印 `检测到配置变更，已热更新运行中的扫描`，`status` 的 QPS 上限也会同步更新。`status` 的当前目录会显示每个一级目录正在处理的并发任务数，例如 `data×8, cache×4`；活跃 worker 总数也会单独显示。
 
 以下参数仍只在下次启动/扫描时生效：`root_path`、`size_basis`、`index_*`、`quick_*`、`scan.*_interval`、`startup_delay`。改这些需要重启 daemon 或重新发起扫描。daemon 的调度周期和扫描根在启动时读取；正在运行的任务可以热更新 QPS/CPU/并发，但不会改变已绑定的扫描根。
 
