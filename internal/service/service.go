@@ -520,7 +520,16 @@ func (s *Service) Partial(ctx context.Context, path string, limit int, includeLa
 			return nil, lastErr
 		}
 		switch latest.Status {
-		case model.RunRunning, model.RunPaused, model.RunInterrupted:
+		case model.RunRunning, model.RunPaused:
+			run = latest
+		case model.RunInterrupted:
+			if partialInterruptedStale(latest.FinishedAt, time.Now()) {
+				finished := "未知时间"
+				if latest.FinishedAt != nil {
+					finished = latest.FinishedAt.Local().Format("2006-01-02 15:04:05")
+				}
+				return nil, fmt.Errorf("当前没有进行中的扫描；最近任务 #%d 已于 %s 中断，未发布正式结果，请用 dirspace top 查看已发布数据", latest.ID, finished)
+			}
 			run = latest
 		default:
 			return nil, fmt.Errorf("当前没有进行中的扫描；已完成的结果请用 dirspace top 查看")
@@ -592,6 +601,16 @@ func (s *Service) Partial(ctx context.Context, path string, limit int, includeLa
 	}
 	view.Mixed = view.FreshDirs > 0 && view.CarriedDirs > 0
 	return view, nil
+}
+
+// partialInterruptedStale prevents an interrupted run from being presented as
+// the current partial scan days later. A recent interruption is still useful
+// for inspecting what completed before the failure.
+func partialInterruptedStale(finished *time.Time, now time.Time) bool {
+	if finished == nil {
+		return false
+	}
+	return now.Sub(*finished) > time.Hour
 }
 
 func partialBytes(d model.DirStat, basis model.SizeBasis) int64 {

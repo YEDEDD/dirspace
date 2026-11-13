@@ -369,7 +369,7 @@ sudo systemctl daemon-reload
 | `dirspace size --path /mnt/a` | 查询目录的缓存大小；`--exact` 未命中时精扫该目录 |
 | `dirspace fs-usage --path /mnt` | 文件系统总容量/已用/可用，不是目录大小 |
 | `dirspace merge --inputs a.db,b.db` | 合并分片数据库 |
-| `dirspace partial` | 扫描中查看合并视图：本轮已完成目录 + 上次未完成目录，标注来源和合计 |
+| `dirspace partial` | 扫描中查看合并视图：本轮已完成目录 + 上次未完成目录，标注来源和合计；中断超过 1 小时会提示查看已发布结果 |
 | `dirspace partial --staging-only` | 只看本轮 staging，不合并上次结果 |
 | `dirspace status` | 缓存、当前任务、已完成目录合计、预计剩余、隐藏 stale 行、数据库 |
 | `dirspace config explain` | 最终生效配置和自动推导值 |

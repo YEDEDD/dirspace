@@ -723,3 +723,18 @@ func TestInterruptedQuickDoesNotPushNextQuickForward(t *testing.T) {
 		t.Fatalf("interrupted quick pushed schedule backwards: %s", sc.quick)
 	}
 }
+
+func TestPartialInterruptedStale(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-2 * time.Hour)
+	recent := now.Add(-10 * time.Minute)
+	if !partialInterruptedStale(&old, now) {
+		t.Fatal("old interruption should be stale")
+	}
+	if partialInterruptedStale(&recent, now) {
+		t.Fatal("recent interruption should remain visible")
+	}
+	if partialInterruptedStale(nil, now) {
+		t.Fatal("unknown finish time should not be treated as stale")
+	}
+}
