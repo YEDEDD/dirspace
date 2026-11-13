@@ -232,6 +232,7 @@ func (sess *scanSession) wait(ctx context.Context) error {
 // Scan runs one scan. It returns a summary even when the run is canceled or
 // fails; the caller should inspect both summary and error.
 func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, error) {
+	s.refreshConfig()
 	rootPath, err := config.NormalizeAbsolutePath(req.RootPath)
 	if err != nil {
 		return nil, err
@@ -804,6 +805,23 @@ func (s *Scanner) monitorControl(ctx context.Context, run *model.Run, control *s
 			}
 		}
 	}
+}
+
+// refreshConfig loads the config file again when a new scan starts. This makes
+// edits made while the daemon was idle apply to the next scan; the active-scan
+// watcher handles edits made while a scan is already running.
+func (s *Scanner) refreshConfig() {
+	old := s.config()
+	if old.Source == "" {
+		return
+	}
+	cfg, err := config.Load(old.Source)
+	if err != nil {
+		s.log.Warn("启动扫描前重新加载配置失败，继续使用内存中的配置",
+			"config", old.Source, "error", err.Error())
+		return
+	}
+	s.setConfig(cfg)
 }
 
 func (s *Scanner) reloadConfig(run *model.Run, controller *performance.Controller, concurrency *scanConcurrency) {
