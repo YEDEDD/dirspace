@@ -1,145 +1,65 @@
 # dirspace
 
-`dirspace` 是一个面向 Linux 的目录空间扫描与缓存服务，适合 NFS、CFS、Lustre 等共享文件系统。它只读文件元数据，统计扫描根目录下**一级子目录**的空间、文件数、子目录数、耗时、状态和准确性，并把受限深度的目录索引写入本地 SQLite。日常查询只读本地缓存，不访问共享存储。
+`dirspace` 是面向 Linux 的目录空间扫描与缓存服务，适合 NFS、CFS、Lustre 等共享文件系统。它只读元数据，统计扫描根下**一级子目录**的空间、文件数、子目录数、耗时和准确性，并把受限深度的目录索引写入本地 SQLite。日常查询只读本地缓存。
 
 GitHub: <https://github.com/YEDEDD/dirspace>
 
-## 特性
-
-- 只读元数据，不读文件内容，不写扫描根目录
-- 一级目录聚合，直接回答“哪个目录占了多少空间”
-- 可配置深度的目录索引，支持 `children` 查询多级明细；只保留每层 top K，避免数据库膨胀
-- 本地 SQLite WAL 缓存，查询不访问共享存储
-- **精确全量**与**快速抽样估算**双模式：精确每周一次，快速默认每 24 小时一次
-- 递归目录树并行：一级目录、子目录、文件 `lstat` 共用工作队列；exact 和 quick 都使用共享 worker 池，单个超大一级目录不再被一级目录数量分走 worker
-- quick 会把抽样文件的 `lstat` 按批交给多个 worker；超大扁平目录的元数据不再被一个目录任务串行处理
-- 可配置 `read_batch_size`（默认 1024）和 `quick_census_files`（默认 16），减少超大目录的 READDIR 和抽样元数据次数
-- `scan --new` 只扫新增或失效的一级目录，不重扫已有的
-- 已删除目录默认从排名中隐藏，并按 `stale_retention_days` 清理
-- 全局限速、CPU/内存保护、共享文件系统延迟自适应暂停
-- 支持暂停、恢复、取消、断点续扫和单目录重算
-- 分片扫描：`scan --shard i/n` 只扫一部分一级目录，多客户端并行后 `merge` 合并
-- `fs-usage` 用 statfs 查询整个挂载点的总容量、已用和可用
-- `monitor` 一屏显示进程/主机资源、生效配置和高低判断
-- `status` 显示活动任务实时已运行时间、活跃 worker 数；查询父目录时也会列出其下独立根的活跃任务
-- `monitor` 会自动选中所属路径下正在运行的子根任务和真实扫描 PID，并显示活跃 worker、当前动态 QPS、任务启动 QPS 与当前配置 QPS；进程被杀后 90 秒自动恢复为中断状态，不会一直显示“扫描中”
-- 失败目录保留上次有效数据；半成品不覆盖正式缓存
-- 单个静态二进制，支持 systemd、JSON、ETA 和慢目录耗时展示
-
 ## 快速开始
 
-### 构建
-
-```bash
-make build            # 当前平台
-make build-linux      # Linux amd64
-make build-linux-arm64
-```
-
-需要 Go 1.27+。也可以直接使用 Release 中的 Linux 二进制：
-
-<https://github.com/YEDEDD/dirspace/releases>
-
-### 安装
+需要 Go 1.27+，也可以直接用 Release 中的 Linux 二进制。
 
 ```bash
 make build-linux
 sudo DIRSPACE_BINARY=bin/dirspace-linux-amd64 scripts/install.sh
 ```
 
-安装脚本会安装二进制、配置、systemd 单元和数据目录，默认启用并启动 `dirspace.service`。已有配置和数据库不会被覆盖。
+安装脚本会安装二进制、配置、systemd 单元和数据目录，默认启用 `dirspace.service`。已有配置和数据库不会被覆盖。
 
-### 首次使用
-
-```bash
-dirspace config explain       # 先看最终配置、挂载和自动推导值
-dirspace quick                # 先跑快速估算，几分钟到几小时出近似结果
-dirspace scan                 # 再跑精确全量，建立准确基线
-dirspace top 20               # 查询只读 SQLite
-dirspace children --path /mnt/cae365  # 查看一级目录下的多级明细
-dirspace size --path /mnt/cae365      # 查一个目录的缓存大小（未命中可加 --exact）
-dirspace partial              # 扫描中查看本轮已完成目录，未完成的沿用上次（合并视图）
-dirspace fs-usage --path /mnt # 文件系统总容量/已用/可用（不是目录大小）
-dirspace status               # 进度、ETA、已完成目录合计、数据库
-dirspace monitor              # 进程/主机资源 + 当前配置 + 配高/配低判断
-```
-
-`quick` 和 `scan` 都可以加 `--path /真实挂载点`。不写时使用 `scan.root_path`。
-
-### 长任务自动转后台
-
-在终端里直接执行 `quick`、`scan`、`refresh`、`rebuild` 或 `size --exact` 时，如果 stdout 是终端，程序会自动拉起一个独立的后台进程后立即返回，不再占用终端：
+首次使用：
 
 ```bash
-dirspace quick --path /mnt
-# 已转入后台运行（PID ...）
-# 日志：/var/lib/dirspace/manual/quick-....log
-# 查看进度：dirspace status --path /mnt
+dirspace config explain                 # 最终配置、挂载和自动推导值
+dirspace quick --path /mnt              # 先出近似结果
+dirspace scan --path /mnt               # 再建精确基线
+dirspace top 20
+dirspace children --path /mnt/cae365
+dirspace size --path /mnt/cae365        # 未命中可加 --exact
+dirspace status --path /mnt
+dirspace monitor --path /mnt
 ```
 
-- 关闭终端、SSH 断开不会中断后台任务
-- 需要前台等待结果时加 `--foreground`
-- 脚本/CI 可以加 `--background` 强制后台；stdout 不是终端时默认仍是前台
-- `--json` 不会自动转后台，避免结果丢失
+`quick`、`scan`、`refresh`、`rebuild` 和 `size --exact` 在终端里会自动转后台；需要等结果加 `--foreground`，脚本/CI 可加 `--background`。`--json` 不自动转后台。
 
-调度器每次唤醒都会重新读数据库计算下次任务，不会因为手动扫描完成后又重复跑一轮。扫描锁按文件系统共享，手动任务、daemon、不同 `--db` 的进程不会同时扫同一个文件系统或嵌套目录。
+## exact 与 quick
 
-## 定时策略
+| | exact | quick |
+|---|---|---|
+| 文件元数据 | 每个文件都 `lstat` | 每目录前 16 个 + 剩余文件 2% 抽样 |
+| 字节数 | 精确 | 抽样估算 |
+| 文件数、目录数 | 精确 | 枚举计数 |
+| 准确性标记 | `exact` | `sampled` |
+| 默认频率 | 每周 | 每 24 小时 |
 
-推荐直接使用常驻 daemon，它同时维护两套调度：
+两种模式都会遍历所有目录、读取所有目录项，quick **不是只扫 2% 的目录**。区别只在文件 `lstat`：
 
-```yaml
-scan:
-  interval: 168h          # 精确全量：每周
-  quick_interval: 24h     # 快速估算：每 24 小时；大目录避免频繁积压
-  quick_sample_percent: 2 # 抽 2% 文件
+```text
+exact ≈ 文件数 + 目录数 × 2
+quick ≈ 目录数 × 2 + 每目录前 16 个文件 + 剩余文件 2%
 ```
 
-- 快速估算先跑，先给用户一个近似视图
-- 精确全量按 `interval` 跑，覆盖近似值
-- 只有快速结果时，`accuracy=sampled`；只有精确结果时，`accuracy=exact`
-- 两套任务串行执行，不会同时扫描同一个根或同一个文件系统
-- 每次唤醒都从数据库重算计划；手动 CLI 扫描完成后，daemon 不会重复执行同一轮
-- 外部任务正在跑时，到期的任务会保持 due 并等待，不会错误顺延一整个周期
-- 每次完成后自动清理历史、已删除目录和过期数据
+小目录不超过 16 个文件时 quick 基本等于 exact；文件很多、目录很少时 quick 快很多；目录很多、文件很少时两者差不多。quick 的误差取决于文件大小分布，目录里混有超大文件时可能偏差很大，不适合计费。exact 和 quick 都使用共享 worker 池，quick 的抽样文件 `lstat` 还会分批并行；但单个目录的 `READDIR` 仍由一个 worker 完成。
 
-如果只想每周跑一次精确任务，也可以使用 systemd timer，但不要再同时启用 `dirspace.service`：
+有效速度大致是：
 
-```ini
-# /etc/systemd/system/dirspace-scan.service
-[Unit]
-Description=dirspace weekly exact scan
-RequiresMountsFor=/mnt
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/dirspace scan --config /etc/dirspace/config.yaml
-Nice=19
-CPUQuota=100%
-MemoryHigh=12%
-MemoryMax=20%
+```text
+有效 QPS ≈ min(配置 QPS, 并发数 / 平均元数据延迟)
 ```
 
-```ini
-# /etc/systemd/system/dirspace-scan.timer
-[Unit]
-Description=Run dirspace every Sunday at 02:00
+NFS 延迟、自动暂停和属性缓存通常比模式差异更大。quick 跑得比 exact 还慢时，先查 NFS，不要加频率。
 
-[Timer]
-OnCalendar=Sun 02:00
-Persistent=true
-RandomizedDelaySec=5m
+## 定时与配置
 
-[Install]
-WantedBy=timers.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now dirspace-scan.timer
-```
-
-## 配置
+推荐常驻 daemon，它同时维护两套调度：quick 先给近似视图，exact 按周期覆盖。默认 exact 每周、quick 每 24 小时，两套任务串行执行。
 
 最小配置：
 
@@ -152,273 +72,76 @@ scan:
   require_mount_point: true
 ```
 
-其余参数使用程序默认值：`quick_sample_percent: 2`、`quick_census_files: 16`、
-`read_batch_size: 1024`、`index_depth: 3`、`index_top_k: 20`、
-`quick_max_files_per_top: 0`、自动内存上限和由 profile 决定的 QPS/并发。
-只有需要覆盖默认值时才写进配置文件。
+其余走默认值：`quick_sample_percent: 2`、`quick_census_files: 16`、`read_batch_size: 1024`、`index_depth: 3`、`index_top_k: 20`、`index_all_dirs: false`、自动内存上限。配置文件里只写要覆盖的项；旧配置中的 `performance` 段仍会覆盖默认值。
 
-生产环境建议加 `require_mount_point: true`，避免挂载没就绪时误扫本地盘。`root_path` 可以是挂载点本身，也可以是挂载点下的子目录；判定要求路径位于一个**非根文件系统**的挂载点下，挂载失败回落到 `/` 时会被拒绝。
+生产环境建议保留 `require_mount_point: true`，避免挂载未就绪时误扫本地盘。`root_path` 可以是非根文件系统的挂载点或挂载点下的子目录。
 
-### 目录索引与下钻
+profile 基线：
 
-扫描时会顺便建立一层受限的目录索引，用于回答“这个目录下面的哪个子目录大”：
+| profile | QPS 上限 | worker 上限 | CPU |
+|---|---:|---:|---:|
+| `low` | 100 | 4 | 10% |
+| `normal` | 300 | 8 | 20% |
+| `fast` | 1000 | 16 | 40% |
 
-```yaml
-scan:
-  index_depth: 3   # 缓存到几级；0 关闭；可设为 4、5
-  index_top_k: 20  # 每个目录只保留最大的 20 个子目录
-```
+`concurrency: auto` 按一级目录数分配 worker，内部由共享信号量限制总并发。QPS 从上限约 1/3 起步，压力正常时逐步升高。`memory_limit: auto` 优先取 cgroup 上限的 80%，否则取物理内存 10%，范围 256MB–4GB。
 
-- 一级目录全部保留
-- 更深层只保留每个父目录的 top K，避免几十亿目录全部写进 SQLite
-- quick 和 exact 都会建立索引；quick 的结果标记为 `sampled`
-- 索引不会增加 NFS 读取次数；扫描本来就会遍历这些目录
-- `index_depth` 只影响内存、数据库大小和可查询深度，不改变扫描范围
-- `index_all_dirs: true` 会保存每个目录的聚合大小，`size` 可以查询任意深层路径；目录多时数据库会变大，按需开启
-- `read_batch_size` 控制每次 `ReadDir` 请求的目录项数量，默认 1024；超大目录可适当加大，但会增加单次内存
-- `quick_census_files` 控制每个目录前多少个文件做完整统计，默认 16；降低它会减少 quick 元数据调用，但估算误差变大
-- `dirspace size --path <目录>` 只读缓存；`--exact` 在缓存未命中时把该目录作为独立根做一次精确扫描，不会重建整个上级根
+目录索引用于 `children`：一级目录全部保留，更深层每级只保留 top K。`index_all_dirs: true` 会保存每个目录的聚合，`size` 可查任意深层路径，但数据库会变大。索引不增加 NFS 读取次数，完整扫描成功后原子替换。
 
-### 分片扫描与合并
-
-当一个根很大，单客户端扫不完时，可以按一级目录分片，在多台客户端上并行：
-
-```bash
-# 客户端 1
-dirspace --db /var/lib/dirspace/shard-0.db scan --path /mnt --shard 0/4
-
-# 客户端 2
-dirspace --db /var/lib/dirspace/shard-1.db scan --path /mnt --shard 1/4
-
-# 其余分片同理
-```
-
-每台客户端只扫自己的一级目录，结果写本地库。全部完成后，在一台机器上合并：
-
-```bash
-dirspace --db /var/lib/dirspace/merged.db --path /mnt \
-  merge --inputs /var/lib/dirspace/shard-0.db,/var/lib/dirspace/shard-1.db,/var/lib/dirspace/shard-2.db,/var/lib/dirspace/shard-3.db
-```
-
-合并后：
-
-```bash
-dirspace --db /var/lib/dirspace/merged.db size --path /mnt
-dirspace --db /var/lib/dirspace/merged.db children --path /mnt
-```
-
-注意：
-
-- 分片根路径必须一致，分片之间不能重叠
-- 分片结果是 `partial`，合并前不要当完整根使用
-- 当前合并按分片求和，**跨分片硬链接尚未去重**；存在跨分片硬链接时不能宣称精确
-- 多客户端总 QPS 需要人工控制，建议每台客户端把 `max_metadata_qps` 设为总预算 / 分片数
-- 单个目录的 `READDIR` 仍然由一个 worker 完成；quick 的抽样 `lstat` 会并行，但目录枚举本身不能跨 worker 拆
-- 分片只能拆一级/子树目录，不能拆单个扁平目录
-
-如果某个一级目录特别大，可以设置：
-
-```yaml
-scan:
-  quick_max_files_per_top: 5000000
-```
-
-达到上限后该目录停止继续枚举，结果标记为 `partial`，空间显示为 `≥`，文件数是已扫到的数量。它是下限，不是完整值；精确全量不受此限制。这样小目录可以先完成，不会被一个巨型目录拖住。
-
-查询某个目录的直接子目录：
-
-```bash
-dirspace children --path /mnt/cae365
-dirspace children --path /mnt/cae365/map --json
-```
-
-如果路径没有出现在索引里，说明它不在 top K 中，或者超过了 `index_depth`；可以提高 `index_depth` 后重新扫描。当前版本还没有对任意深层路径单独 drill 的命令，`rebuild` 仍然只支持一级目录。
-
-索引在完整扫描成功后原子替换；断点续扫不会用不完整的结果覆盖旧索引，下一次完整扫描会刷新。
-
-### profile
-
-| profile | QPS 上限 | worker 上限 | CPU | 内存默认值 | 适用 |
-|---|---:|---:|---:|---:|---|
-| `low` | 100 | 4 | 10% | auto | 生产优先 |
-| `normal` | 300 | 8 | 20% | auto | 默认 |
-| `fast` | 1000 | 16 | 40% | auto | 维护窗口 |
-
-profile 只是基线，`performance` 下的字段可以覆盖它。三个 profile 的内存默认都是 `auto`：优先按 cgroup 上限的 80% 推导，没有 cgroup 时按物理内存 10%（256MB–4GB）。
-
-### 自动推导
-
-- `concurrency: auto`：按实际一级目录数分配 worker，不再固定写死。
-- 递归目录树并行：子目录和文件批次都进入同一队列，深目录不再被单个线程拖住。
-- QPS 从上限约 1/3 起步，压力正常时逐步升到上限。
-- `memory_limit: auto`：读取 cgroup 内存上限，取 80%；没有 cgroup 时按物理内存 10%，最低 256MB。
-- systemd 单元默认用 `MemoryHigh=12%`、`MemoryMax=20%`、`CPUQuota=100%`，按整机自动缩放，不再写死 512M。百分比内存限制需要 systemd 231+；旧系统请改回固定值。
-- `CPUQuota` 的百分比是**单核**的百分比，100% 表示最多一个 CPU 核。
-- `max_load1` 默认 0，不按本机 load 判断共享存储压力。
-
-### 已删除目录与历史
-
-- 扫描时发现目录已删除，旧行标记为 `stale`，不会立刻删除，避免短暂挂载异常造成数据丢失
-- `top` / `list` 默认隐藏 `stale` 行，`status` 会显示隐藏行数
-- 扫描进行中，`partial` 默认显示合并视图：本轮已完成的目录用本轮结果，本轮未完成的目录沿用上次成功结果，并标注来源；正式 `top_dirs` 仍只在整轮完成后原子发布。加 `--staging-only` 可只看本轮 staging
-- `database.stale_retention_days` 默认 7 天，daemon 每次扫描后自动清理
-- `database.retention_days` 默认 90 天，控制历史统计
-
-### 扫描中的 partial 合并视图
-
-`partial` 不会覆盖已经发布的 `top_dirs`，只在读取时合并：
-
-- 本轮已经完成的目录：显示本轮结果，来源标记为“本轮”
-- 本轮还没完成的目录：显示上次成功结果，来源标记为“上次”
-- 本轮新增目录：显示本轮结果
-- 本轮失败或尚未扫到的目录：保留上次结果，完成前不删除
-
-输出会分别给出“本轮已完成”“沿用上次”和“混合合计”。混合合计不是同一时点的完整快照，不能用于计费或严格趋势对比。`partial --staging-only` 可以只看本轮 staging，保持旧行为；JSON 中每行带 `source`，顶层带 `mixed`、`fresh_dirs`、`carried_dirs`、`fresh_total_bytes`、`carried_total_bytes`、`merged_total_bytes`。
-
-### 高级覆盖
-
-```yaml
-performance:
-  concurrency: auto
-  max_metadata_qps: 500
-  max_cpu_percent: 20
-  memory_limit: auto      # 或 512MB
-  nfs_slow_latency: 500ms
-  nfs_pause_latency: 5s
-  nfs_pause_cooldown: 30s
-  max_metadata_errors: 8
-
-database:
-  stale_retention_days: 7
-```
-
-不要把数据库放在共享存储上，也不要放在扫描根目录内。
-
-## 重启、替换二进制与续扫
-
-- **只替换二进制文件**：Linux 上正在运行的进程继续使用旧 inode，当前扫描不受影响；之后执行的 `dirspace status/top` 已经是新二进制，可以正常读 SQLite。
-- **`systemctl restart`**：旧进程收到 SIGTERM，当前扫描会中断，未完成的一级目录不会发布；已完成目录的 staging 会保留。
-- 新进程启动时，如果最新**精确**任务处于 `interrupted/running/paused`，会先恢复精确扫描，再安排快速估算；如果只有最新**快速**任务处于这些状态，会先恢复快速估算。
-- 快速续扫会读取已完成的 `run_dirs`，跳过这些一级目录，只重扫中断时正在处理的目录；不会再创建新 quick 清空 staging。
-- 恢复需要 `scan.resume_interrupted: true`（默认 true），并且配置、数据库和扫描根保持一致；精确和快速只恢复各自模式的最新任务，不会把 sampled 结果当 exact 发布。
-- 进程被 `SIGKILL` 或异常退出时，90 秒没有心跳后会被标记为中断，下一次对应模式的扫描会尝试续扫。
-- 精确扫描进行中，手动 `quick` 会被拒绝，避免覆盖 staging。
-
-### 从旧 mnt-usage 升级
-
-旧 `mnt-usage` 的配置、数据库 schema 和 systemd 单元名不一定与 `dirspace` 完全一致。**不要直接覆盖旧数据库**，先按下面顺序验证：
-
-```bash
-# 1. 备份数据库（含 WAL）
-sudo cp -a /var/lib/mnt-usage/usage.db /var/lib/mnt-usage/usage.db.bak
-sudo cp -a /var/lib/mnt-usage/usage.db-wal /var/lib/mnt-usage/usage.db-wal.bak 2>/dev/null || true
-sudo cp -a /var/lib/mnt-usage/usage.db-shm /var/lib/mnt-usage/usage.db-shm.bak 2>/dev/null || true
-
-# 2. 在副本上验证新版能否识别旧 schema 和配置
-cp /var/lib/mnt-usage/usage.db /tmp/mnt-usage-test.db
-dirspace --config /etc/mnt-usage/config.yaml --db /tmp/mnt-usage-test.db   status --path /mnt
-```
-
-如果第 2 步报配置字段或数据库版本错误，说明旧版本与当前 schema 不兼容；保留旧库，改用新配置/新数据库重新扫描，不要强行迁移。
-
-验证通过后，再决定是否重启旧服务：
-
-```bash
-# 先看旧单元到底怎么启动的
-systemctl cat mnt-usage.service
-
-# 如果单元直接引用 /usr/local/bin/mnt-usage，可原地替换文件
-sudo install -m 0755 dirspace-linux-amd64 /usr/local/bin/mnt-usage
-
-# 或者把 ExecStart 改成 /usr/local/bin/dirspace，并保留原来的 --config/--db 参数
-sudo systemctl daemon-reload
-```
-
-旧任务 `65/66` 已有大量 staging 时，升级后第一次启动应当恢复精确任务，只重扫未完成目录；前提是旧数据库里的 run 状态和 `run_dirs` 仍可读。
-
-## 扫描耗时
-
-精确全量仍然是**全量元数据遍历**，没有安全的通用增量。先看公式：
-
-```text
-精确耗时 ≈ (文件数 + 目录数 × 2) / 有效元数据 QPS
-有效 QPS ≈ min(配置 QPS, 并发数 / 平均元数据延迟)
-```
-
-| 文件数 | 100 QPS | 300 QPS | 1000 QPS |
-|---:|---:|---:|---:|
-| 100 万 | 约 2.8 小时 | 约 56 分钟 | 约 17 分钟 |
-| 1700 万 | 约 47 小时 | 约 15.7 小时 | 约 4.7 小时 |
-| 2000 万 | 约 55.6 小时 | 约 18.5 小时 | 约 5.6 小时 |
-
-这是 QPS 打满时的下限；自适应限速会从约 1/3 起步。
-
-**快速估算**只对一部分文件做 `lstat`，但仍要遍历目录树：
-
-```text
-快速耗时 ≈ (目录操作 + 抽样文件数) / 有效 QPS
-```
-
-它适合回答“哪个目录大、大概多少”，不适合计费或精确对账。抽样结果会标记为 `sampled`，不会被当成精确值。
-
-50T 全量 50 小时，意味着单机容量审计已经到瓶颈：70T 如果文件数增加约 16.7%，接近 58 小时；如果只是大文件变大，可能仍是 50 小时。500T 单机精确全量不可行，需要多客户端分片（当前版本未实现），或者接受快速估算。
-
-## 命令
+## 常用命令
 
 | 命令 | 作用 |
 |---|---|
-| `dirspace` / `dirspace top 20` | 一级目录空间排名，显示数据时间、状态、耗时 |
-| `dirspace list` | 全部可见一级目录（完整名称） |
-| `dirspace children --path /mnt/a` | 查看目录索引中 a 的直接子目录（受 index_depth/top_k 限制） |
-| `dirspace size --path /mnt/a` | 查询目录的缓存大小；`--exact` 未命中时精扫该目录 |
-| `dirspace fs-usage --path /mnt` | 文件系统总容量/已用/可用，不是目录大小 |
+| `dirspace top 20` / `list` | 一级目录排名 / 全部可见目录 |
+| `dirspace children --path /mnt/a` | 查看索引中的直接子目录 |
+| `dirspace size --path /mnt/a` | 查缓存大小；`--exact` 未命中时精扫该目录 |
+| `dirspace fs-usage --path /mnt` | 文件系统容量，不是目录大小 |
+| `dirspace status` | 当前任务、进度、ETA、QPS、worker、数据库 |
+| `dirspace monitor` | 进程/主机资源和生效配置 |
+| `dirspace quick` / `scan` | 快速估算 / 精确全量 |
+| `dirspace scan --new` | 只扫新增或失效的一级目录 |
+| `dirspace partial` | 扫描中查看本轮与上次结果的合并视图 |
 | `dirspace merge --inputs a.db,b.db` | 合并分片数据库 |
-| `dirspace partial` | 扫描中查看合并视图：本轮已完成目录 + 上次未完成目录，标注来源和合计；中断超过 1 小时会提示查看已发布结果 |
-| `dirspace partial --staging-only` | 只看本轮 staging，不合并上次结果 |
-| `dirspace status` | 缓存、当前任务、已完成目录合计、预计剩余、隐藏 stale 行、数据库 |
 | `dirspace config explain` | 最终生效配置和自动推导值 |
-| `dirspace quick` | 快速抽样估算，标记 `sampled` |
-| `dirspace scan` | 精确全量扫描 |
-| `dirspace scan --new` | 只扫新增/失效的一级目录，需要已有基线 |
-| `dirspace refresh` | 精确刷新（全量） |
-| `dirspace rebuild <目录>` | 只重算一个一级目录 |
-| `dirspace pause/resume/cancel` | 控制当前扫描 |
-| `dirspace daemon` | 常驻调度：快速 + 精确 |
-| `dirspace monitor` | 一屏资源、配置和高低判断 |
-| `dirspace quick --foreground` | 前台运行，不自动转后台 |
-| `dirspace quick --background` | 脚本中强制后台运行 |
-| `dirspace cleanup` | 清理历史、stale 行，可选 VACUUM |
-| `dirspace backup` | 备份 SQLite |
-| `dirspace doctor` | 检查或修复数据库 |
+| `dirspace daemon` | 常驻调度 quick + exact |
 
-常用参数：`--path`、`--config`、`--db`、`--json`、`--logical`、`--full`、`--new`、`--resume`、`--once`。
+`pause`、`resume`、`cancel`、`refresh`、`rebuild`、`cleanup`、`backup`、`doctor` 等完整命令见 `dirspace --help`。常用参数：`--path`、`--config`、`--db`、`--json`、`--logical`、`--foreground`、`--background`。
 
-## 语义与限制
+## 后台、暂停与续扫
 
-- 排名和 `top` 仍以一级子目录为单位；目录索引额外保存到 `index_depth` 层的 top K 子目录，供 `children` 下钻。
+- 关闭终端或 SSH 断开不会中断后台任务；日志在 `/var/lib/dirspace/manual/`，用 `status` 看进度。
+- `systemctl restart` 会中断当前扫描，已完成目录的 staging 保留；下次启动默认续扫，前提是 `scan.resume_interrupted: true`。
+- 进程被 `SIGKILL` 后约 90 秒标记中断。exact 和 quick 只恢复各自模式的最新任务，不会把 sampled 结果当 exact 发布。
+- 精确扫描进行中，手动 `quick` 会被拒绝，避免覆盖 staging。
+- 只替换二进制不影响正在运行的旧进程；要换版本可先 `install`，再在维护窗口 `restart`。
+
+## 大根与分片
+
+单机扫不完时，可以按一级目录分片，多客户端各写本地库，最后合并：
+
+```bash
+dirspace --db /var/lib/dirspace/shard-0.db scan --path /mnt --shard 0/4
+dirspace --db /var/lib/dirspace/merged.db --path /mnt \
+  merge --inputs shard-0.db,shard-1.db,shard-2.db,shard-3.db
+```
+
+分片根路径必须一致，分片不能重叠；合并前结果是 `partial`。跨分片硬链接目前不去重，不能宣称精确。分片只能拆一级/子树目录，不能把单个扁平目录拆给多个 worker；多客户端总 QPS 需要人工分配。
+
+## 限制与安全
+
 - 默认按 `allocated`（`st_blocks × 512`）统计，接近 `du`；`--logical` 使用 `st_size`。
-- **精确全量每轮都遍历全部元数据**。没有可靠的 NFS/Lustre 客户端增量，目录 mtime 和 inotify 都不可靠。
-- `scan --new` 只处理新增或非 fresh 的一级目录，不检查已有目录内部的变化；结果标记为近似。
-- 快速估算的字节数是抽样推算，目录块和文件数是精确的；硬链接不做去重，可能轻微高估。
-- 快速抽样按“路径哈希 + 每目录前 32 个文件 census”选择，并对剩余文件做权重还原；不是按目录顺序取每 N 个。小目录因此精确，大目录仍可能因为超大文件漏采而偏差。当前没有置信区间输出。
-- 共享文件系统客户端有属性缓存，结果不是实时值；删除的目录可能短暂显示为 stale，随后隐藏并清理。
-- 硬链接在精确模式下只计一次，归属目录在并发扫描下可能变化；总量准确，单目录可能有偏差。
-- 扫描失败或取消不发布半成品；失败目录保留上次有效数据。
-- 查询只读 SQLite，共享存储断开时历史结果仍可查看。
-- `status` 显示当前心跳窗口的**实际元数据 QPS**和当前限速；任务结束后显示本轮全程平均 QPS。
-- 这是容量审计/容量视图工具，不是实时监控，也不是文件内容扫描器。
-- 500T 级别且要求精确、低延迟时，单机全量不是正确架构；需要多客户端分片，当前版本没有实现。
+- exact 每轮遍历全部元数据，没有可靠的 NFS/Lustre 增量；`scan --new` 只看新增或非 fresh 的一级目录，不检查已有目录内部变化。
+- quick 的文件数按枚举计数，字节是抽样估算，没有置信区间；小目录通常很准，大目录遇到超大文件漏采会偏差。
+- 硬链接在 exact 根内只计一次，归属目录可能因并发而变化；跨分片硬链接不去重。
+- 共享文件系统客户端有属性缓存，结果不是实时值；删除的目录可能短暂显示 `stale`，随后隐藏并清理。
+- `partial` 是合并视图，不是同一时点的完整快照，不能用于计费或严格趋势对比。
+- 精确、要求低延迟的 500T 级根不适合单机全量，应使用分片或多客户端方案。
 
-## 冷数据安全
+只读与冷数据：
 
-扫描只读取元数据，不读取文件内容，也不执行任何回热动作：
-
-- 只用 `Lstat`、`stat`、`readdir`、`fstat`，不 `open` 普通文件
-- 不执行 `lfs hsm_restore`，不调用 CFS 生命周期预热/拉取接口
-- 不写入扫描目录，不重命名、不改权限、不改属主
-- 元数据查询不更新文件 `atime`，因此不会触发 CFS 低频层/外置存储的数据加载
-
-需要放在本地盘的只有 SQLite、日志、配置和备份文件；数据库路径会拒绝扫描根目录内和 NFS 挂载点。不要把 `--config`、`--output` 指向需要保持冷的业务文件。
+- 只用 `Lstat`、`stat`、`readdir`、`fstat`，不 `open` 普通文件，不读内容。
+- 不执行 HSM restore，不写扫描目录，不改权限/属主，不更新文件 `atime`。
+- SQLite、日志、配置和备份必须放本地盘，不要放共享存储或扫描根内。
 
 ## 开发与许可
 
@@ -429,6 +152,4 @@ make test
 make test-race
 ```
 
-性能验证脚本：`bash tests/perf/run.sh`。
-
-MIT License，见 [LICENSE](LICENSE)。
+性能验证：`bash tests/perf/run.sh`。MIT License，见 [LICENSE](LICENSE)。
