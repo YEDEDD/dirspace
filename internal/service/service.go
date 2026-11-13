@@ -784,6 +784,8 @@ type StatusView struct {
 	MetadataOps       int64
 	MetadataQPS       float64
 	MetadataLimit     float64
+	NextExactAt       time.Time
+	NextQuickAt       time.Time
 	ChildActive       []ChildActive
 }
 
@@ -826,6 +828,9 @@ func (s *Service) Status(ctx context.Context, path string) (*StatusView, error) 
 		SizeBasis: s.sizeBasis(),
 	}
 	view.Active, _ = s.Store.ActiveRun(ctx, root.ID)
+	next := s.nextSchedule(ctx, root.Path)
+	view.NextExactAt = next.exact
+	view.NextQuickAt = next.quick
 	if view.Active != nil {
 		if staged, stagedErr := s.Store.StagedDirs(ctx, view.Active.ID, 0, model.BasisAllocated); stagedErr == nil {
 			for _, d := range staged {

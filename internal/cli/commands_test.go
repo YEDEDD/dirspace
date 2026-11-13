@@ -212,6 +212,9 @@ func TestCLIVersionHelp(t *testing.T) {
 	if !strings.Contains(stdout, "常用查询") || !strings.Contains(stdout, "children --path") || !strings.Contains(stdout, "size --path") {
 		t.Fatalf("help is missing common query examples: %s", stdout)
 	}
+	if strings.Contains(stdout, "beegfs") {
+		t.Fatalf("help must use generic example paths: %s", stdout)
+	}
 }
 
 func TestConfigExplainWorksWithoutDatabase(t *testing.T) {

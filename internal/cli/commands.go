@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.15.7"
+var Version = "1.15.8"
 
 const (
 	exitOK      = 0
@@ -899,14 +899,14 @@ func printHelp(w io.Writer) {
   # 一级目录排名
   dirspace top 10
   # 查某个目录下的直接子目录；路径必须用 --path，数字是显示条数
-  dirspace children --path /data/beegfs_storage/cloud_storage_data
-  dirspace children --path /data/beegfs_storage/cloud_storage_data 30
+  dirspace children --path /data/project/cache
+  dirspace children --path /data/project/cache 30
   # 查某个目录的最新大小；--exact 会强制重新扫该目录，不用旧缓存
-  dirspace size --path /data/beegfs_storage/cloud_storage_data/4ZdQuVyZiDS/common/51r1PstJ1hy --exact
+  dirspace size --path /data/project/cache/tenant --exact
   # 查扫描中的一级目录进度
-  dirspace partial --path /data/beegfs_storage
+  dirspace partial --path /data/project
   # 刷新整个扫描根
-  dirspace refresh --path /data/beegfs_storage
+  dirspace refresh --path /data/project
 
 示例:
   dirspace

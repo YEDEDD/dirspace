@@ -114,6 +114,26 @@ func formatAge(t *time.Time) string {
 	}
 }
 
+func formatUntil(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return "未安排"
+	}
+	until := time.Until(*t)
+	if until <= 0 {
+		return "已到期"
+	}
+	switch {
+	case until < time.Minute:
+		return "不到 1 分钟后"
+	case until < time.Hour:
+		return fmt.Sprintf("%d 分钟后", int(until.Minutes()))
+	case until < 24*time.Hour:
+		return fmt.Sprintf("%d 小时后", int(until.Hours()))
+	default:
+		return fmt.Sprintf("%d 天后", int(until.Hours()/24))
+	}
+}
+
 func formatTimestamp(t *time.Time) string {
 	if t == nil || t.IsZero() {
 		return "—"

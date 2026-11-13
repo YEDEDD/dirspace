@@ -91,6 +91,8 @@ type statusJSON struct {
 	MetadataOps       int64             `json:"metadata_ops"`
 	MetadataQPS       float64           `json:"metadata_qps"`
 	MetadataQPSLimit  float64           `json:"metadata_qps_limit"`
+	NextExactAt       *time.Time        `json:"next_exact_at,omitempty"`
+	NextQuickAt       *time.Time        `json:"next_quick_at,omitempty"`
 }
 
 type runJSON struct {
@@ -215,6 +217,14 @@ func buildStatusJSON(view *service.StatusView) statusJSON {
 	if last == nil {
 		out.TotalText = "n/a"
 	}
+	if !view.NextExactAt.IsZero() {
+		next := view.NextExactAt
+		out.NextExactAt = &next
+	}
+	if !view.NextQuickAt.IsZero() {
+		next := view.NextQuickAt
+		out.NextQuickAt = &next
+	}
 	return out
 }
 
@@ -250,6 +260,16 @@ func printStatus(w io.Writer, view *service.StatusView) {
 	fmt.Fprintf(w, "上次成功统计：%s（%s）\n", formatTimestamp(last), formatAgeWithStatus(last, view.DataStatus))
 	fmt.Fprintf(w, "最近尝试：%s\n", formatTimestamp(attempt))
 	fmt.Fprintf(w, "上次扫描耗时：%s\n", formatDuration(duration))
+	if view.NextExactAt.IsZero() {
+		fmt.Fprintln(w, "下次精确扫描：未安排")
+	} else {
+		fmt.Fprintf(w, "下次精确扫描：%s（%s）\n", formatTimestamp(&view.NextExactAt), formatUntil(&view.NextExactAt))
+	}
+	if view.NextQuickAt.IsZero() {
+		fmt.Fprintln(w, "下次快速扫描：已关闭")
+	} else {
+		fmt.Fprintf(w, "下次快速扫描：%s（%s）\n", formatTimestamp(&view.NextQuickAt), formatUntil(&view.NextQuickAt))
+	}
 	selectedSize := alloc
 	if view.SizeBasis == model.BasisLogical {
 		selectedSize = logical

@@ -822,6 +822,22 @@ func TestDiffComparesCompletedSnapshots(t *testing.T) {
 	}
 }
 
+func TestStatusIncludesNextScheduledScans(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := f.svc.Status(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.NextExactAt.IsZero() || view.NextQuickAt.IsZero() {
+		t.Fatalf("missing next schedules: exact=%v quick=%v", view.NextExactAt, view.NextQuickAt)
+	}
+}
+
 func TestSizeExactForcesRescanOfIndexedPath(t *testing.T) {
 	f := newServiceFixture(t)
 	root := f.cfg.Scan.RootPath
