@@ -1,10 +1,65 @@
-# dirspace 最小配置：只保留与部署相关的少量自定义项。
-# QPS、并发、CPU/内存、NFS 延迟阈值和 quick 抽样参数都使用程序默认值。
+# dirspace 配置
+#
+# 默认只写部署相关项；其余键是可选的覆盖参考，不用全部打开。
+# profile 是基线，performance 下的同名项会覆盖它。
+#
+# profile:
+#   low    生产优先：QPS 100，worker 4，CPU 10%
+#   normal 默认：QPS 300，worker 8，CPU 20%
+#   fast   维护窗口：QPS 1000，worker 16，CPU 40%
 profile: fast
 
 scan:
   root_path: /mnt
-  # 大目录一次 quick 可能超过一天，避免 6 小时一轮造成持续积压。
+  # 快速估算周期；0 关闭 quick。大目录建议不短于一轮扫描耗时。
   quick_interval: 24h
-  # 挂载未就绪时拒绝扫描，避免误扫本地盘。
+  # 挂载未就绪时拒绝扫描，避免误扫本地盘；扫普通本地目录时改 false。
   require_mount_point: true
+
+  # 以下 scan 项都可选，默认值见行尾；需要时取消注释。
+  # interval: 168h                 # 精确全量周期，默认每周
+  # size_basis: allocated          # allocated 或 logical
+  # extra_roots: []                # 额外扫描根
+  # quick_sample_percent: 2        # quick 尾部抽样比例，默认 2%
+  # quick_census_files: 16         # 每目录前 N 个文件精算，默认 16
+  # read_batch_size: 1024          # 每次 ReadDir 的目录项数，默认 1024
+  # index_depth: 3                 # 目录索引深度，0 关闭
+  # index_top_k: 20                # 每层保留的 top K 子目录
+  # index_all_dirs: false          # 保存每个目录聚合，数据库会变大
+  # quick_max_files_per_top: 0     # 0 不限制；>0 超出后标记 partial
+  # scan_on_start: true            # 首次启动立即建基线
+  # startup_delay: 15s             # 启动延迟，避开开机高峰
+  # resume_interrupted: true       # 重启后续扫未完成任务
+  # inventory:
+  #   enabled: false               # 实验功能：记录文件清单
+  #   batch_size: 1000
+
+# 数据库默认在 /var/lib/dirspace/usage.db；不要放在共享存储或扫描根内。
+# database:
+#   path: /var/lib/dirspace/usage.db
+#   busy_timeout: 5s
+#   retention_days: 90             # 历史统计保留天数
+#   stale_retention_days: 7        # 已删除目录缓存保留天数
+
+# 高级覆盖，通常不需要填写；不写就使用 profile 推导值。
+# performance:
+#   concurrency: auto              # auto 或固定数字，例如 8
+#   max_metadata_qps: 1000
+#   min_metadata_qps: 100
+#   max_cpu_percent: 40
+#   memory_limit: auto             # auto 或 512MB
+#   adaptive_throttle: true
+#   low_priority: true
+#   sample_interval: 5s
+#   max_host_cpu_percent: 85       # 0 关闭宿主机 CPU 检查
+#   max_load1: 0                   # 0 关闭宿主机 load 检查
+#   nfs_slow_latency: 1s
+#   nfs_pause_latency: 10s
+#   nfs_pause_cooldown: 30s
+#   max_metadata_errors: 8
+#   progress_interval: 10s
+#   heartbeat_interval: 5s
+
+# logging:
+#   level: info                    # debug / info / warn / error
+#   format: text                   # text / json

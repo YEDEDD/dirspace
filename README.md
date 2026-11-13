@@ -72,7 +72,7 @@ scan:
   require_mount_point: true
 ```
 
-其余走默认值：`quick_sample_percent: 2`、`quick_census_files: 16`、`read_batch_size: 1024`、`index_depth: 3`、`index_top_k: 20`、`index_all_dirs: false`、自动内存上限。配置文件里只写要覆盖的项；旧配置中的 `performance` 段仍会覆盖默认值。
+其余走默认值：`quick_sample_percent: 2`、`quick_census_files: 16`、`read_batch_size: 1024`、`index_depth: 3`、`index_top_k: 20`、`index_all_dirs: false`、自动内存上限。配置文件里只写要覆盖的项；`configs/config.yaml` 保留了所有可选键的注释和默认值，需要时取消注释即可。旧配置中的 `performance` 段仍会覆盖默认值。
 
 生产环境建议保留 `require_mount_point: true`，避免挂载未就绪时误扫本地盘。`root_path` 可以是非根文件系统的挂载点或挂载点下的子目录。
 
