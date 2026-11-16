@@ -49,51 +49,6 @@ type DeviceAssessment struct {
 	Reason string
 }
 
-func assessDevice(m DeviceMetrics) DeviceAssessment {
-	if !m.Supported || !m.Valid {
-		return DeviceAssessment{}
-	}
-	kind := m.Kind
-	if kind == "" {
-		kind = DeviceUnknown
-	}
-	var warnAwait, criticalAwait, warnQueue, criticalQueue float64
-	switch kind {
-	case DeviceHDD:
-		warnAwait, criticalAwait = 20, 50
-		warnQueue, criticalQueue = 8, 24
-	case DeviceSSD:
-		warnAwait, criticalAwait = 5, 20
-		warnQueue, criticalQueue = 16, 64
-	case DeviceNVMe:
-		warnAwait, criticalAwait = 2, 10
-		warnQueue, criticalQueue = 32, 128
-	default:
-		warnAwait, criticalAwait = 10, 50
-		warnQueue, criticalQueue = 8, 32
-	}
-
-	// %util is not a primary signal: RAID, SSD and shared devices can report
-	// 100% while still having usable headroom. It only sharpens a decision
-	// that is already supported by latency or queue depth.
-	if m.Queue >= criticalQueue || m.ReadAwait >= criticalAwait || m.WriteAwait >= criticalAwait {
-		return DeviceAssessment{
-			Level:  DevicePressureCritical,
-			Reason: "设备延迟或队列已达严重阈值",
-		}
-	}
-	if m.Queue >= warnQueue || m.ReadAwait >= warnAwait || m.WriteAwait >= warnAwait {
-		return DeviceAssessment{
-			Level:  DevicePressureWarn,
-			Reason: "设备延迟或队列已达警告阈值",
-		}
-	}
-	if kind == DeviceHDD && m.Util >= 95 && m.Queue >= 4 {
-		return DeviceAssessment{Level: DevicePressureWarn, Reason: "HDD 利用率高且队列开始积压"}
-	}
-	return DeviceAssessment{}
-}
-
 // ProbeDevice takes a short preflight sample of a local block device. It is
 // used as an admission check before starting a scan. Network/FUSE sources and
 // platforms without /proc/diskstats return no pressure.

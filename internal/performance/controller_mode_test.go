@@ -67,6 +67,8 @@ func TestCriticalDeviceReducesQPSAndWorkers(t *testing.T) {
 	c := testController("safe", DeviceMetrics{
 		Supported: true, Valid: true, Kind: DeviceHDD, ReadAwait: 100, Queue: 50,
 	})
+	c.deviceBaseline, c.deviceBaselineSet = 10, true
+	c.sample(&hostSampler{})
 	c.sample(&hostSampler{})
 	if got := c.Rate(); got >= 333 {
 		t.Fatalf("critical device did not reduce QPS: %v", got)
@@ -109,9 +111,75 @@ func TestAutoFallsBackToSafeAfterRepeatedCritical(t *testing.T) {
 	c := testController("auto", DeviceMetrics{
 		Supported: true, Valid: true, Kind: DeviceHDD, ReadAwait: 100, Queue: 50,
 	})
+	c.deviceBaseline, c.deviceBaselineSet = 10, true
 	c.sample(&hostSampler{})
 	c.sample(&hostSampler{})
 	if got := c.Mode(); got != ControlSafe {
 		t.Fatalf("mode=%v, want safe", got)
+	}
+}
+
+func TestWatchHoldsWithoutBackingOff(t *testing.T) {
+	c := testController("auto", DeviceMetrics{
+		Supported: true, Valid: true, Kind: DeviceHDD, ReadAwait: 14, Queue: 2,
+	})
+	c.deviceBaseline, c.deviceBaselineSet = 10, true
+	c.sample(&hostSampler{})
+	c.sample(&hostSampler{})
+	if c.pressureLevel != PressureWatch {
+		t.Fatalf("pressure=%v, want watch", c.pressureLevel)
+	}
+	if got := c.Rate(); got != 333 {
+		t.Fatalf("watch changed rate to %v", got)
+	}
+}
+
+func TestWarningNeedsTwoSamples(t *testing.T) {
+	c := testController("safe", DeviceMetrics{
+		Supported: true, Valid: true, Kind: DeviceHDD, ReadAwait: 25, Queue: 2,
+	})
+	c.deviceBaseline, c.deviceBaselineSet = 10, true
+	c.sample(&hostSampler{})
+	if got := c.Rate(); got != 333 {
+		t.Fatalf("first warning sample changed rate to %v", got)
+	}
+	c.sample(&hostSampler{})
+	if got := c.Rate(); got >= 333 {
+		t.Fatalf("confirmed warning did not reduce rate: %v", got)
+	}
+}
+
+func TestRecoveryNeedsSixNormalSamples(t *testing.T) {
+	c := testController("safe", DeviceMetrics{
+		Supported: true, Valid: true, Kind: DeviceHDD, ReadAwait: 25, Queue: 2,
+	})
+	c.deviceBaseline, c.deviceBaselineSet = 10, true
+	c.sample(&hostSampler{})
+	c.sample(&hostSampler{})
+	if c.pressureLevel != PressureWarning {
+		t.Fatalf("pressure=%v, want warning", c.pressureLevel)
+	}
+	c.device = fakeDeviceSampler{metrics: DeviceMetrics{
+		Supported: true, Valid: true, Kind: DeviceHDD, ReadAwait: 5, Queue: 1,
+	}}
+	for i := 0; i < 5; i++ {
+		c.sample(&hostSampler{})
+	}
+	if c.pressureLevel == PressureNormal {
+		t.Fatal("recovered before six normal samples")
+	}
+	c.sample(&hostSampler{})
+	if c.pressureLevel != PressureNormal {
+		t.Fatalf("pressure=%v after six normal samples, want normal", c.pressureLevel)
+	}
+}
+
+func TestLatencyP95(t *testing.T) {
+	c := testController("safe", DeviceMetrics{})
+	for _, d := range []time.Duration{time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond, 100 * time.Millisecond} {
+		c.ObserveMetadata(d, nil)
+	}
+	if got := c.LatencyP95(); got < 3 {
+		t.Fatalf("p95=%vms, want >=3", got)
 	}
 }
