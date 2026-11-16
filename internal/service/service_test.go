@@ -635,6 +635,25 @@ func TestSizeReadsAllDirectoryIndex(t *testing.T) {
 	}
 }
 
+func TestSizeReadsFirstLevelFromTopDirs(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a.bin"), 4096)
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := f.svc.Size(context.Background(), filepath.Join(root, "alpha"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Entry == nil || view.Entry.Path != "alpha" || view.Entry.AllocBytes == 0 {
+		t.Fatalf("first-level size entry: %+v", view.Entry)
+	}
+	if view.Scanned {
+		t.Fatal("cached first-level size should not rescan")
+	}
+}
+
 func TestSizeExactScansUnindexedSubtree(t *testing.T) {
 	f := newServiceFixture(t)
 	root := f.cfg.Scan.RootPath

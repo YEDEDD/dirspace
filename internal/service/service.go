@@ -519,6 +519,22 @@ func (s *Service) Size(ctx context.Context, path string, exact bool) (*SizeView,
 			} else if !errors.Is(entryErr, storage.ErrNotFound) {
 				return nil, entryErr
 			} else if !exact {
+				// dir_index intentionally stores descendants, while top_dirs
+				// stores the first-level aggregates. size on a first-level
+				// directory must consult both.
+				if !strings.Contains(rel, "/") {
+					if top, topErr := s.Store.GetDir(ctx, root.ID, rel); topErr == nil {
+						return &SizeView{Path: requested, Root: *root, Entry: &model.DirIndexEntry{
+							RootID: root.ID, Path: rel, ParentPath: "", Name: top.Name, Depth: 1,
+							AllocBytes: top.AllocBytes, LogicalBytes: top.LogicalBytes,
+							FileCount: top.FileCount, DirCount: top.DirCount,
+							SymlinkCount: top.SymlinkCount, DataStatus: top.DataStatus,
+							Accuracy: top.Accuracy, Truncated: top.Truncated,
+						}, SizeBasis: s.sizeBasis()}, nil
+					} else if !errors.Is(topErr, storage.ErrNotFound) {
+						return nil, topErr
+					}
+				}
 				return nil, fmt.Errorf("目录 %s 尚未进入索引；可使用 dirspace size --path %s --exact 单独扫描该目录，或开启 scan.index_all_dirs 并重新扫描所属根", requested, requested)
 			}
 		} else if rel == "" {
