@@ -84,3 +84,14 @@ performance:
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
 }
+
+func TestAutoProfileCanResolvePerRootClass(t *testing.T) {
+	cfg := DefaultForProfile("auto")
+	cfg.applyAutoProfileForClass("local")
+	localQPS := cfg.Performance.MaxMetadataQPS
+	cfg.applyAutoProfileForClass("network")
+	networkQPS := cfg.Performance.MaxMetadataQPS
+	if localQPS != 4000 || networkQPS != 1000 {
+		t.Fatalf("local=%d network=%d", localQPS, networkQPS)
+	}
+}

@@ -365,7 +365,8 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	if req.TargetDir != "" {
 		req.Mode = model.ModeRebuild
 	}
-	if strings.ToLower(s.config().Performance.ControlMode) != "observe" {
+	runCfg := s.config().ForRoot(rootPath)
+	if strings.ToLower(runCfg.Performance.ControlMode) != "observe" {
 		if assessment := performance.ProbeDevice(mountinfo.Source(rootPath), time.Second); assessment.Level == performance.DevicePressureCritical {
 			return nil, fmt.Errorf("设备当前压力过高，已推迟扫描: %s", assessment.Reason)
 		}
@@ -390,7 +391,7 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 
 	run, err := s.store.StartRun(ctx, rootPath, storage.StartOptions{
 		Mode:           req.Mode,
-		MetadataLimit:  float64(s.config().Performance.MaxMetadataQPS),
+		MetadataLimit:  float64(runCfg.Performance.MaxMetadataQPS),
 		SizeBasis:      basis,
 		Resume:         req.Resume,
 		ResumeCanceled: req.ResumeCanceled,
@@ -424,28 +425,28 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	counters.current.Store("")
 
 	controller := performance.NewController(performance.Limits{
-		BaseQPS:          s.config().Performance.MaxMetadataQPS,
-		Mode:             s.config().Performance.ControlMode,
-		Impact:           s.config().Performance.Impact,
-		WorkerLimit:      s.config().Performance.Concurrency.Limit(),
+		BaseQPS:          runCfg.Performance.MaxMetadataQPS,
+		Mode:             runCfg.Performance.ControlMode,
+		Impact:           runCfg.Performance.Impact,
+		WorkerLimit:      runCfg.Performance.Concurrency.Limit(),
 		DeviceSource:     mountinfo.Source(rootPath),
-		StartQPS:         s.config().Performance.StartQPS(),
-		MinQPS:           s.config().Performance.MinMetadataQPS,
-		MaxCPUPercent:    s.config().Performance.MaxCPUPercent,
-		MemoryLimit:      s.config().Performance.MemoryLimit.Resolve(),
-		Adaptive:         s.config().Performance.AdaptiveThrottle,
-		SampleInterval:   s.config().Performance.SampleInterval.Duration,
-		MaxHostCPU:       s.config().Performance.MaxHostCPUPercent,
-		MaxLoad1:         s.config().Performance.MaxLoad1,
-		SlowLatency:      s.config().Performance.SlowMetadataLatency.Duration,
-		PauseLatency:     s.config().Performance.PauseMetadataLatency.Duration,
-		PauseCooldown:    s.config().Performance.PauseCooldown.Duration,
-		MaxMetadataError: s.config().Performance.MaxMetadataErrors,
+		StartQPS:         runCfg.Performance.StartQPS(),
+		MinQPS:           runCfg.Performance.MinMetadataQPS,
+		MaxCPUPercent:    runCfg.Performance.MaxCPUPercent,
+		MemoryLimit:      runCfg.Performance.MemoryLimit.Resolve(),
+		Adaptive:         runCfg.Performance.AdaptiveThrottle,
+		SampleInterval:   runCfg.Performance.SampleInterval.Duration,
+		MaxHostCPU:       runCfg.Performance.MaxHostCPUPercent,
+		MaxLoad1:         runCfg.Performance.MaxLoad1,
+		SlowLatency:      runCfg.Performance.SlowMetadataLatency.Duration,
+		PauseLatency:     runCfg.Performance.PauseMetadataLatency.Duration,
+		PauseCooldown:    runCfg.Performance.PauseCooldown.Duration,
+		MaxMetadataError: runCfg.Performance.MaxMetadataErrors,
 	}, s.log)
 	controller.Start(scanCtx)
 
 	oldProcs := runtime.GOMAXPROCS(0)
-	procs := s.config().Performance.Concurrency.Limit()
+	procs := runCfg.Performance.Concurrency.Limit()
 	if procs < 1 {
 		procs = 1
 	}
@@ -952,6 +953,7 @@ func (s *Scanner) reloadConfig(run *model.Run, controller *performance.Controlle
 		s.log.Warn("配置文件已变化，但重新加载失败", "config", source, "error", err.Error())
 		return
 	}
+	runCfg := cfg.ForRoot(run.RootPath)
 	old := s.config()
 	rootChanged := cfg.Scan.RootPath != run.RootPath
 	if rootChanged {
@@ -961,37 +963,37 @@ func (s *Scanner) reloadConfig(run *model.Run, controller *performance.Controlle
 		s.setConfig(cfg)
 	}
 	controller.UpdateLimits(performance.Limits{
-		BaseQPS:          cfg.Performance.MaxMetadataQPS,
-		Mode:             cfg.Performance.ControlMode,
-		Impact:           cfg.Performance.Impact,
-		WorkerLimit:      cfg.Performance.Concurrency.Limit(),
+		BaseQPS:          runCfg.Performance.MaxMetadataQPS,
+		Mode:             runCfg.Performance.ControlMode,
+		Impact:           runCfg.Performance.Impact,
+		WorkerLimit:      runCfg.Performance.Concurrency.Limit(),
 		DeviceSource:     mountinfo.Source(run.RootPath),
-		StartQPS:         cfg.Performance.StartQPS(),
-		MinQPS:           cfg.Performance.MinMetadataQPS,
-		MaxCPUPercent:    cfg.Performance.MaxCPUPercent,
-		MemoryLimit:      cfg.Performance.MemoryLimit.Resolve(),
-		Adaptive:         cfg.Performance.AdaptiveThrottle,
-		SampleInterval:   cfg.Performance.SampleInterval.Duration,
-		MaxHostCPU:       cfg.Performance.MaxHostCPUPercent,
-		MaxLoad1:         cfg.Performance.MaxLoad1,
-		SlowLatency:      cfg.Performance.SlowMetadataLatency.Duration,
-		PauseLatency:     cfg.Performance.PauseMetadataLatency.Duration,
-		PauseCooldown:    cfg.Performance.PauseCooldown.Duration,
-		MaxMetadataError: cfg.Performance.MaxMetadataErrors,
+		StartQPS:         runCfg.Performance.StartQPS(),
+		MinQPS:           runCfg.Performance.MinMetadataQPS,
+		MaxCPUPercent:    runCfg.Performance.MaxCPUPercent,
+		MemoryLimit:      runCfg.Performance.MemoryLimit.Resolve(),
+		Adaptive:         runCfg.Performance.AdaptiveThrottle,
+		SampleInterval:   runCfg.Performance.SampleInterval.Duration,
+		MaxHostCPU:       runCfg.Performance.MaxHostCPUPercent,
+		MaxLoad1:         runCfg.Performance.MaxLoad1,
+		SlowLatency:      runCfg.Performance.SlowMetadataLatency.Duration,
+		PauseLatency:     runCfg.Performance.PauseMetadataLatency.Duration,
+		PauseCooldown:    runCfg.Performance.PauseCooldown.Duration,
+		MaxMetadataError: runCfg.Performance.MaxMetadataErrors,
 	})
-	limit := cfg.Performance.Concurrency.Limit()
+	limit := runCfg.Performance.Concurrency.Limit()
 	concurrency.SetLimit(limit)
 	runtime.GOMAXPROCS(limit)
 	updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer updateCancel()
-	if err := s.store.SetRunMetadataLimit(updateCtx, run.ID, float64(cfg.Performance.MaxMetadataQPS)); err != nil {
+	if err := s.store.SetRunMetadataLimit(updateCtx, run.ID, float64(runCfg.Performance.MaxMetadataQPS)); err != nil {
 		s.log.Warn("更新任务 QPS 限速字段失败", "run_id", run.ID, "error", err.Error())
 	}
 	s.log.Info("检测到配置变更，已热更新运行中的扫描",
 		"run_id", run.ID,
-		"qps", cfg.Performance.MaxMetadataQPS,
+		"qps", runCfg.Performance.MaxMetadataQPS,
 		"workers", limit,
-		"cpu_percent", cfg.Performance.MaxCPUPercent,
+		"cpu_percent", runCfg.Performance.MaxCPUPercent,
 		"old_workers", old.Performance.Concurrency.Limit())
 }
 

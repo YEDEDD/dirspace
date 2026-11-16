@@ -809,6 +809,17 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// ForRoot returns a shallow copy with profile:auto resolved against this root
+// rather than only the primary scan.root_path. Explicit performance keys win,
+// so users do not need to hand-tune each mount point.
+func (c *Config) ForRoot(root string) *Config {
+	clone := *c
+	if clone.Profile == "auto" {
+		clone.applyAutoProfileForClass(mountinfo.ClassForPath(root))
+	}
+	return &clone
+}
+
 // AllRoots returns the primary root followed by additional roots, de-duplicated.
 func (c *Config) AllRoots() []string {
 	seen := make(map[string]struct{})
