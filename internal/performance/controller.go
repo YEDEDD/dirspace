@@ -13,6 +13,42 @@ import (
 	"time"
 )
 
+// ControlMode limits what the adaptive controller may do.
+type ControlMode string
+
+const (
+	ControlObserve ControlMode = "observe"
+	ControlSafe    ControlMode = "safe"
+	ControlAuto    ControlMode = "auto"
+)
+
+func parseControlMode(value string) ControlMode {
+	switch ControlMode(value) {
+	case ControlObserve, ControlSafe, ControlAuto:
+		return ControlMode(value)
+	default:
+		return ControlSafe
+	}
+}
+
+// Impact is a behavioural policy, not a QPS value.
+type Impact string
+
+const (
+	ImpactLow      Impact = "low"
+	ImpactBalanced Impact = "balanced"
+	ImpactFast     Impact = "fast"
+)
+
+func parseImpact(value string) Impact {
+	switch Impact(value) {
+	case ImpactLow, ImpactBalanced, ImpactFast:
+		return Impact(value)
+	default:
+		return ImpactBalanced
+	}
+}
+
 // Limits are the scanner's resource guardrails.
 type Limits struct {
 	BaseQPS          int
@@ -27,6 +63,13 @@ type Limits struct {
 	PauseLatency     time.Duration
 	PauseCooldown    time.Duration
 	MaxMetadataError int
+	// Mode, Impact, WorkerLimit and DeviceSource are the P0 control inputs.
+	// An empty Mode means safe; an empty Impact means balanced.
+	Mode         string
+	Impact       string
+	WorkerLimit  int
+	DeviceSource string
+	StartQPS     int
 }
 
 // Controller combines the metadata QPS token bucket, process CPU governor,
@@ -50,6 +93,19 @@ type Controller struct {
 	lastPauseLog   int64
 	lastMemoryGC   time.Time
 	healthySamples int
+
+	mode           ControlMode
+	impact         Impact
+	device         deviceSampler
+	workerLimit    atomic.Int64
+	devicePressure atomic.Int64
+	deviceReason   atomic.Value // string
+	lastObserveLog string
+	targetQPS      float64
+	calibrated     bool
+	sampleCount    int
+	autoCritical   int
+	lastCritical   time.Time
 }
 
 func NewController(limits Limits, log *slog.Logger) *Controller {
@@ -68,8 +124,11 @@ func NewController(limits Limits, log *slog.Logger) *Controller {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
-	startQPS := limits.BaseQPS
-	if limits.Adaptive && startQPS >= 10 {
+	startQPS := limits.StartQPS
+	if startQPS < 1 {
+		startQPS = limits.BaseQPS
+	}
+	if limits.StartQPS < 1 && limits.Adaptive && startQPS >= 10 {
 		// Start below the ceiling and let the sampler ramp up only while the
 		// filesystem stays healthy. This avoids hitting a shared NFS server at
 		// full rate in the first seconds of a scan.
@@ -81,10 +140,24 @@ func NewController(limits Limits, log *slog.Logger) *Controller {
 	controller := &Controller{
 		limits:   limits,
 		throttle: NewThrottle(startQPS, limits.MinQPS),
-		cpu:      NewCPUGuard(limits.MaxCPUPercent),
+		cpu:      NewCPUGuardForCores(limits.MaxCPUPercent, runtime.NumCPU()),
 		log:      log,
+		mode:     parseControlMode(limits.Mode),
+		impact:   parseImpact(limits.Impact),
+	}
+	controller.workerLimit.Store(int64(normalizeWorkerLimit(limits.WorkerLimit)))
+	controller.targetQPS = float64(limits.BaseQPS)
+	if limits.DeviceSource != "" {
+		if sampler := newDeviceSampler(limits.DeviceSource); sampler != nil {
+			controller.device = sampler
+		}
 	}
 	controller.reason.Store("")
+	controller.deviceReason.Store("")
+	controller.log.Info("扫描控制器启动",
+		"mode", controller.mode, "impact", controller.impact,
+		"start_qps", round1(float64(startQPS)), "base_qps", limits.BaseQPS,
+		"worker_limit", controller.workerLimit.Load())
 	if limits.MemoryLimit > 0 {
 		debug.SetMemoryLimit(limits.MemoryLimit)
 	}
@@ -130,6 +203,12 @@ func (c *Controller) UpdateLimits(limits Limits) {
 		rate = float64(limits.BaseQPS)
 	}
 	c.throttle.SetRate(rate)
+	c.mode = parseControlMode(limits.Mode)
+	c.impact = parseImpact(limits.Impact)
+	if limits.WorkerLimit > 0 {
+		c.workerLimit.Store(int64(normalizeWorkerLimit(limits.WorkerLimit)))
+	}
+	c.cpu.SetCores(runtime.NumCPU())
 	c.cpu.SetMaxPercent(limits.MaxCPUPercent)
 	if limits.MemoryLimit > 0 {
 		debug.SetMemoryLimit(limits.MemoryLimit)
@@ -160,9 +239,10 @@ func (c *Controller) loop(ctx context.Context) {
 }
 
 func (c *Controller) sample(sampler *hostSampler) {
-	pressure := false
-	reason := ""
 	limits := c.snapshotLimits()
+	pressure := false
+	critical := false
+	reason := ""
 
 	metrics := sampler.Sample()
 	if metrics.Supported {
@@ -172,7 +252,9 @@ func (c *Controller) sample(sampler *hostSampler) {
 		}
 		if limits.MaxLoad1 > 0 && metrics.Load1 > limits.MaxLoad1 {
 			pressure = true
-			reason = "宿主机 Load 高"
+			if reason == "" {
+				reason = "宿主机 Load 高"
+			}
 		}
 	}
 
@@ -198,38 +280,258 @@ func (c *Controller) sample(sampler *hostSampler) {
 	if limits.SlowLatency > 0 && latency > limits.SlowLatency.Seconds() {
 		pressure = true
 		if reason == "" {
-			reason = "NFS 元数据延迟高"
+			reason = "元数据延迟高"
+		}
+	}
+
+	// Device pressure is a first-class signal. It is deliberately not reduced
+	// to "%util": on HDD, SSD, RAID and shared devices the useful signals are
+	// latency and queue depth. The sampler returns Valid=false for the first
+	// sample and for non-local mounts.
+	if c.device != nil {
+		dm := c.device.Sample()
+		assessment := assessDevice(dm)
+		c.devicePressure.Store(int64(assessment.Level))
+		if assessment.Level != DevicePressureNone {
+			c.deviceReason.Store(assessment.Reason)
+			if c.mode == ControlObserve {
+				c.logObserveDevice(assessment)
+			} else {
+				pressure = true
+				if reason == "" {
+					reason = assessment.Reason
+				}
+				if assessment.Level == DevicePressureCritical {
+					critical = true
+					if c.mode == ControlAuto {
+						now := time.Now()
+						if !c.lastCritical.IsZero() && now.Sub(c.lastCritical) <= 10*time.Minute {
+							c.autoCritical++
+						} else {
+							c.autoCritical = 1
+						}
+						c.lastCritical = now
+						if c.autoCritical >= 2 {
+							c.mode = ControlSafe
+							c.log.Warn("auto 模式连续遇到设备严重压力，回退到 safe", "device", dm.Name)
+						}
+					}
+				}
+			}
+		} else {
+			c.deviceReason.Store("")
 		}
 	}
 
 	if !limits.Adaptive {
 		return
 	}
-	rate := c.throttle.Rate()
+	if c.mode != ControlObserve {
+		c.sampleCount++
+		if !c.calibrated && c.sampleCount >= 2 && latency > 0 {
+			capacity := float64(c.workerLimit.Load()) / latency
+			if capacity > float64(limits.BaseQPS) {
+				capacity = float64(limits.BaseQPS)
+			}
+			ratio := impactRatio(c.impact)
+			c.targetQPS = capacity * ratio
+			if c.targetQPS < float64(limits.MinQPS) {
+				c.targetQPS = float64(limits.MinQPS)
+			}
+			c.calibrated = true
+			c.log.Info("完成起始容量探测", "capacity_qps", round1(capacity),
+				"target_qps", round1(c.targetQPS), "impact", c.impact)
+		}
+	}
+	if c.mode == ControlObserve {
+		c.logObserveDecision(pressure, critical, reason)
+		// Observe must not change the scan relative to the pre-controller
+		// behaviour: still run the legacy host/latency adaptation, but never
+		// apply device pressure, worker reductions or device pauses.
+		if pressure {
+			if next := c.throttle.Rate() * 0.65; next < c.throttle.Rate() {
+				if next < float64(limits.MinQPS) {
+					next = float64(limits.MinQPS)
+				}
+				c.throttle.SetRate(next)
+			}
+			c.healthySamples = 0
+		} else {
+			c.healthySamples++
+			if c.healthySamples >= 3 {
+				if rate := c.throttle.Rate(); rate < float64(limits.BaseQPS) {
+					next := rate * 1.2
+					if next > float64(limits.BaseQPS) {
+						next = float64(limits.BaseQPS)
+					}
+					c.throttle.SetRate(next)
+				}
+				c.healthySamples = 0
+			}
+		}
+		return
+	}
 	if pressure {
+		c.reduceWorkers(critical)
+		if critical {
+			c.PauseFor(limits.PauseCooldown, reason)
+		}
+		rate := c.throttle.Rate()
 		next := rate * 0.65
+		if critical {
+			next = rate * 0.50
+		}
 		if next < float64(limits.MinQPS) {
 			next = float64(limits.MinQPS)
 		}
 		if next < rate {
 			c.throttle.SetRate(next)
 			c.log.Warn("检测到资源压力，降低元数据扫描速率",
-				"reason", reason, "qps", round1(next), "host_load1", round1(metrics.Load1),
-				"host_cpu", round1(metrics.CPUPercent), "nfs_latency_ms", round1(latency*1000))
+				"reason", reason, "qps", round1(next), "critical", critical,
+				"host_load1", round1(metrics.Load1),
+				"host_cpu", round1(metrics.CPUPercent), "metadata_latency_ms", round1(latency*1000))
 		}
 		c.healthySamples = 0
-	} else {
-		c.healthySamples++
-		if c.healthySamples >= 3 && rate < float64(limits.BaseQPS) {
+		return
+	}
+
+	if c.mode == ControlAuto && c.calibrated {
+		rate := c.throttle.Rate()
+		if rate > c.targetQPS {
+			c.throttle.SetRate(c.targetQPS)
+			return
+		}
+		if rate < c.targetQPS*0.9 {
+			next := rate * 2
+			if next > c.targetQPS {
+				next = c.targetQPS
+			}
+			c.throttle.SetRate(next)
+			c.log.Info("容量探测后快速爬坡", "qps", round1(next), "target", round1(c.targetQPS))
+			return
+		}
+	}
+
+	// Safe mode can lower an over-aggressive start after calibration, but it
+	// never raises the rate within the same scan.
+	if c.mode == ControlSafe && c.calibrated {
+		if rate := c.throttle.Rate(); rate > c.targetQPS {
+			c.throttle.SetRate(c.targetQPS)
+		}
+		c.healthySamples = 0
+		return
+	}
+	if c.mode != ControlAuto {
+		c.healthySamples = 0
+		return
+	}
+	c.healthySamples++
+	needed := 3
+	switch c.impact {
+	case ImpactFast:
+		needed = 2
+	case ImpactLow:
+		needed = 5
+	}
+	if c.healthySamples >= needed {
+		rate := c.throttle.Rate()
+		if rate < float64(limits.BaseQPS) {
 			next := rate * 1.2
 			if next > float64(limits.BaseQPS) {
 				next = float64(limits.BaseQPS)
 			}
 			c.throttle.SetRate(next)
 			c.log.Info("资源恢复正常，逐步提高元数据扫描速率", "qps", round1(next))
-			c.healthySamples = 0
 		}
+		c.healthySamples = 0
 	}
+}
+
+func (c *Controller) reduceWorkers(critical bool) {
+	current := c.workerLimit.Load()
+	if current <= 1 {
+		return
+	}
+	floor := int64(1)
+	if initial := int64(normalizeWorkerLimit(c.snapshotLimits().WorkerLimit)); initial > 4 {
+		floor = initial / 4
+	}
+	next := current * 3 / 4
+	if critical {
+		next = current / 2
+	}
+	if next < floor {
+		next = floor
+	}
+	if next < current {
+		c.workerLimit.Store(next)
+		c.log.Warn("降低扫描有效并发", "from", current, "to", next, "critical", critical)
+	}
+}
+
+func (c *Controller) logObserveDevice(a DeviceAssessment) {
+	key := "device:" + a.Reason
+	if c.lastObserveLog == key {
+		return
+	}
+	c.lastObserveLog = key
+	c.log.Info("observe：检测到设备压力，未改变扫描行为", "reason", a.Reason)
+}
+
+func (c *Controller) logObserveDecision(pressure, critical bool, reason string) {
+	key := "decision:" + reason
+	if c.lastObserveLog == key {
+		return
+	}
+	c.lastObserveLog = key
+	action := "保持"
+	if critical {
+		action = "建议暂停"
+	} else if pressure {
+		action = "建议降速"
+	}
+	c.log.Info("observe：控制器建议", "action", action, "reason", reason)
+}
+
+func impactRatio(impact Impact) float64 {
+	switch impact {
+	case ImpactLow:
+		return 0.2
+	case ImpactFast:
+		return 0.8
+	default:
+		return 0.5
+	}
+}
+
+func normalizeWorkerLimit(value int) int {
+	if value < 1 {
+		return 1
+	}
+	if value > 64 {
+		return 64
+	}
+	return value
+}
+
+// RecommendedWorkers is the effective concurrency ceiling. It only decreases
+// during a scan; a new scan starts from the configured worker cap again.
+func (c *Controller) RecommendedWorkers() int {
+	return int(c.workerLimit.Load())
+}
+
+// Mode returns the active control mode.
+func (c *Controller) Mode() ControlMode { return c.mode }
+
+// DevicePressure returns the last device pressure level.
+func (c *Controller) DevicePressure() DevicePressure {
+	return DevicePressure(c.devicePressure.Load())
+}
+
+// DeviceReason returns the last device pressure reason.
+func (c *Controller) DeviceReason() string {
+	value, _ := c.deviceReason.Load().(string)
+	return value
 }
 
 // Wait blocks for one NFS metadata operation. It respects pause, memory

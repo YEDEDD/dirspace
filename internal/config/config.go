@@ -372,7 +372,13 @@ type PerformanceConfig struct {
 	MemoryLimit      Bytes       `yaml:"memory_limit"`
 	AdaptiveThrottle bool        `yaml:"adaptive_throttle"`
 	LowPriority      bool        `yaml:"low_priority"`
-	SampleInterval   Duration    `yaml:"sample_interval"`
+	// Impact is a behavioural policy: low, balanced, or fast. It is not a QPS.
+	Impact string `yaml:"impact"`
+	// ControlMode limits what the adaptive controller may do: observe, safe,
+	// or auto. The default is safe so a new deployment never speeds up before
+	// the operator has seen its telemetry.
+	ControlMode    string   `yaml:"control_mode"`
+	SampleInterval Duration `yaml:"sample_interval"`
 	// Host thresholds. Values <= 0 disable the corresponding check.
 	MaxHostCPUPercent    float64  `yaml:"max_host_cpu_percent"`
 	MaxLoad1             float64  `yaml:"max_load1"`
@@ -383,6 +389,40 @@ type PerformanceConfig struct {
 	ProgressInterval     Duration `yaml:"progress_interval"`
 	HeartbeatInterval    Duration `yaml:"heartbeat_interval"`
 	explicit             map[string]bool
+}
+
+// StartQPS returns the initial metadata rate for this policy. It is a
+// conservative starting point, not a capacity estimate: the controller still
+// raises or lowers it from live pressure. Observe mode keeps the historical
+// one-third start so turning observation on does not itself change the scan.
+func (p PerformanceConfig) StartQPS() int {
+	qps := p.MaxMetadataQPS
+	if qps < 1 {
+		return 1
+	}
+	if !p.AdaptiveThrottle || qps < 10 {
+		return qps
+	}
+	mode := p.ControlMode
+	if mode == "" || mode == "safe" || mode == "auto" {
+		ratio := 0.5
+		switch p.Impact {
+		case "low":
+			ratio = 0.2
+		case "fast":
+			ratio = 0.8
+		}
+		qps = int(float64(qps) * ratio)
+	} else {
+		qps /= 3
+	}
+	if qps < p.MinMetadataQPS {
+		qps = p.MinMetadataQPS
+	}
+	if qps < 1 {
+		qps = 1
+	}
+	return qps
 }
 
 // performanceYAML decodes both the generic latency keys and the legacy NFS
@@ -396,6 +436,8 @@ type performanceYAML struct {
 	MemoryLimit        Bytes       `yaml:"memory_limit"`
 	AdaptiveThrottle   bool        `yaml:"adaptive_throttle"`
 	LowPriority        bool        `yaml:"low_priority"`
+	Impact             string      `yaml:"impact"`
+	ControlMode        string      `yaml:"control_mode"`
 	SampleInterval     Duration    `yaml:"sample_interval"`
 	MaxHostCPUPercent  float64     `yaml:"max_host_cpu_percent"`
 	MaxLoad1           float64     `yaml:"max_load1"`
@@ -416,7 +458,8 @@ func (p *PerformanceConfig) UnmarshalYAML(value *yaml.Node) error {
 	known := map[string]struct{}{
 		"concurrency": {}, "max_metadata_qps": {}, "min_metadata_qps": {},
 		"max_cpu_percent": {}, "memory_limit": {}, "adaptive_throttle": {},
-		"low_priority": {}, "sample_interval": {}, "max_host_cpu_percent": {},
+		"low_priority": {}, "impact": {}, "control_mode": {},
+		"sample_interval": {}, "max_host_cpu_percent": {},
 		"max_load1": {}, "slow_metadata_latency": {}, "pause_metadata_latency": {},
 		"pause_cooldown": {}, "nfs_slow_latency": {}, "nfs_pause_latency": {},
 		"nfs_pause_cooldown": {}, "max_metadata_errors": {}, "progress_interval": {},
@@ -447,6 +490,8 @@ func (p *PerformanceConfig) UnmarshalYAML(value *yaml.Node) error {
 		MemoryLimit:       p.MemoryLimit,
 		AdaptiveThrottle:  p.AdaptiveThrottle,
 		LowPriority:       p.LowPriority,
+		Impact:            p.Impact,
+		ControlMode:       p.ControlMode,
 		SampleInterval:    p.SampleInterval,
 		MaxHostCPUPercent: p.MaxHostCPUPercent,
 		MaxLoad1:          p.MaxLoad1,
@@ -465,6 +510,8 @@ func (p *PerformanceConfig) UnmarshalYAML(value *yaml.Node) error {
 		MemoryLimit:          aux.MemoryLimit,
 		AdaptiveThrottle:     aux.AdaptiveThrottle,
 		LowPriority:          aux.LowPriority,
+		Impact:               aux.Impact,
+		ControlMode:          aux.ControlMode,
 		SampleInterval:       aux.SampleInterval,
 		MaxHostCPUPercent:    aux.MaxHostCPUPercent,
 		MaxLoad1:             aux.MaxLoad1,
@@ -512,6 +559,32 @@ const (
 	// DefaultProfile is the safe default for mixed production use.
 	DefaultProfile = "normal"
 )
+
+func normalizeImpact(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "balanced":
+		return "balanced"
+	case "low":
+		return "low"
+	case "fast":
+		return "fast"
+	default:
+		return ""
+	}
+}
+
+func normalizeControlMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "safe":
+		return "safe"
+	case "observe":
+		return "observe"
+	case "auto":
+		return "auto"
+	default:
+		return ""
+	}
+}
 
 func normalizeProfile(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
@@ -578,6 +651,8 @@ func DefaultForProfile(name string) *Config {
 			MemoryLimit:          Bytes{Auto: true},
 			AdaptiveThrottle:     true,
 			LowPriority:          true,
+			Impact:               "balanced",
+			ControlMode:          "safe",
 			SampleInterval:       Duration{5 * time.Second},
 			MaxHostCPUPercent:    85,
 			MaxLoad1:             0,
@@ -842,6 +917,17 @@ func (c *Config) Validate() error {
 	}
 	c.Profile = profile
 	c.applyAutoProfile()
+
+	if impact := normalizeImpact(c.Performance.Impact); impact == "" {
+		return fmt.Errorf("performance.impact 非法: %s（可选 low、balanced、fast）", c.Performance.Impact)
+	} else {
+		c.Performance.Impact = impact
+	}
+	if mode := normalizeControlMode(c.Performance.ControlMode); mode == "" {
+		return fmt.Errorf("performance.control_mode 非法: %s（可选 observe、safe、auto）", c.Performance.ControlMode)
+	} else {
+		c.Performance.ControlMode = mode
+	}
 
 	p := &c.Performance
 	if p.Concurrency.Max < 1 || p.Concurrency.Max > 64 {

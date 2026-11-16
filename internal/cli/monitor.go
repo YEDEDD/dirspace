@@ -29,6 +29,8 @@ type monitorConfig struct {
 	Concurrency            string  `json:"concurrency"`
 	ConcurrencyMax         int     `json:"concurrency_max"`
 	MaxMetadataQPS         int     `json:"max_metadata_qps"`
+	ControlMode            string  `json:"control_mode"`
+	Impact                 string  `json:"impact"`
 	MaxCPUPercent          int     `json:"max_cpu_percent"`
 	MemoryLimit            int64   `json:"memory_limit"`
 	MemoryLimitAuto        bool    `json:"memory_limit_auto"`
@@ -78,6 +80,8 @@ func monitorCommand(ctx context.Context, cfg *config.Config, path string, status
 			Concurrency:            cfg.Performance.Concurrency.String(),
 			ConcurrencyMax:         cfg.Performance.Concurrency.Limit(),
 			MaxMetadataQPS:         cfg.Performance.MaxMetadataQPS,
+			ControlMode:            cfg.Performance.ControlMode,
+			Impact:                 cfg.Performance.Impact,
 			MaxCPUPercent:          cfg.Performance.MaxCPUPercent,
 			MemoryLimit:            cfg.Performance.MemoryLimit.Resolve(),
 			MemoryLimitAuto:        cfg.Performance.MemoryLimit.Auto,
@@ -436,10 +440,11 @@ func assessMonitor(r monitorReport) monitorVerdict {
 		high = true
 		v.Reasons = append(v.Reasons, "进程 RSS 已接近应用内存上限")
 	}
-	if cfg.MaxCPUPercent > 0 && rt.ProcessCPUPercent >= 0.85*float64(cfg.MaxCPUPercent) &&
+	processCPUHost := processCPUOfHost(rt.ProcessCPUPercent)
+	if cfg.MaxCPUPercent > 0 && processCPUHost >= 0.85*float64(cfg.MaxCPUPercent) &&
 		(rt.QPSLimit <= 0 || rt.QPS < 0.8*rt.QPSLimit) {
 		low = true
-		v.Reasons = append(v.Reasons, fmt.Sprintf("进程 CPU %.1f%% 已接近配置上限 %d%%，但 QPS 未到限速", rt.ProcessCPUPercent, cfg.MaxCPUPercent))
+		v.Reasons = append(v.Reasons, fmt.Sprintf("进程 CPU %.1f%%（整机）已接近配置上限 %d%%，但 QPS 未到限速", processCPUHost, cfg.MaxCPUPercent))
 	}
 	if !staleLimit && rt.QPSLimit > 0 && rt.QPS >= 0.85*rt.QPSLimit && rt.HostCPUPercent < 70 &&
 		(cfg.MaxLoad1 <= 0 || rt.HostLoad1 < cfg.MaxLoad1) {
@@ -447,7 +452,7 @@ func assessMonitor(r monitorReport) monitorVerdict {
 		v.Reasons = append(v.Reasons, fmt.Sprintf("QPS %.0f 已接近限速 %.0f，但主机 CPU/Load 还有余量", rt.QPS, rt.QPSLimit))
 	}
 	if !staleLimit && rt.QPSLimit > 0 && rt.QPS > 0 && rt.QPS < 0.5*rt.QPSLimit && rt.HostCPUPercent < 50 &&
-		(cfg.MaxCPUPercent <= 0 || rt.ProcessCPUPercent < 0.5*float64(cfg.MaxCPUPercent)) {
+		(cfg.MaxCPUPercent <= 0 || processCPUHost < 0.5*float64(cfg.MaxCPUPercent)) {
 		low = true
 		v.Reasons = append(v.Reasons, "QPS 和进程 CPU 都明显低于配置上限")
 	}
@@ -485,8 +490,9 @@ func printMonitor(w io.Writer, r monitorReport) {
 	fmt.Fprintln(w, "配置")
 	fmt.Fprintf(w, "  并发：%s\n", r.Config.Concurrency)
 	fmt.Fprintf(w, "  QPS：%d（自适应启动值更低）\n", r.Config.MaxMetadataQPS)
+	fmt.Fprintf(w, "  控制模式：%s；业务影响：%s\n", r.Config.ControlMode, r.Config.Impact)
 	if r.Config.MaxCPUPercent > 0 {
-		fmt.Fprintf(w, "  CPU：%d%%（单核）\n", r.Config.MaxCPUPercent)
+		fmt.Fprintf(w, "  CPU：%d%%（整机）\n", r.Config.MaxCPUPercent)
 	} else {
 		fmt.Fprintln(w, "  CPU：不限制")
 	}
@@ -508,7 +514,7 @@ func printMonitor(w io.Writer, r monitorReport) {
 	fmt.Fprintf(w, "  慢元数据延迟：慢 %dms，暂停 %dms\n\n", r.Config.SlowMetadataLatencyMS, r.Config.PauseMetadataLatencyMS)
 
 	fmt.Fprintln(w, "运行")
-	fmt.Fprintf(w, "  进程 CPU：%.1f%%", r.Runtime.ProcessCPUPercent)
+	fmt.Fprintf(w, "  进程 CPU：%.1f%%（整机）", processCPUOfHost(r.Runtime.ProcessCPUPercent))
 	if r.Config.MaxCPUPercent > 0 {
 		fmt.Fprintf(w, " / 上限 %d%%", r.Config.MaxCPUPercent)
 	}
@@ -591,4 +597,12 @@ func parseUintBytes(s string) int64 {
 	}
 	n, _ := strconv.ParseInt(s, 10, 64)
 	return n
+}
+
+func processCPUOfHost(processCPU float64) float64 {
+	cores := runtime.NumCPU()
+	if cores < 1 {
+		return processCPU
+	}
+	return processCPU / float64(cores)
 }

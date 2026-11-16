@@ -49,7 +49,9 @@ scan:
 #   concurrency: auto              # auto 或固定数字，例如 8
 #   max_metadata_qps: 1000
 #   min_metadata_qps: 100
-#   max_cpu_percent: 40
+#   control_mode: safe             # observe 只记录 / safe 只降速 / auto 允许升速
+#   impact: balanced               # low / balanced / fast，业务影响策略，不是 QPS
+#   max_cpu_percent: 40            # 整机 CPU 百分比
 #   memory_limit: auto             # auto 或 512MB
 #   adaptive_throttle: true
 #   low_priority: true

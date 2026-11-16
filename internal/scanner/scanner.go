@@ -365,6 +365,11 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 	if req.TargetDir != "" {
 		req.Mode = model.ModeRebuild
 	}
+	if strings.ToLower(s.config().Performance.ControlMode) != "observe" {
+		if assessment := performance.ProbeDevice(mountinfo.Source(rootPath), time.Second); assessment.Level == performance.DevicePressureCritical {
+			return nil, fmt.Errorf("设备当前压力过高，已推迟扫描: %s", assessment.Reason)
+		}
+	}
 	if req.Mode == "" {
 		req.Mode = model.ModeFull
 	}
@@ -420,6 +425,11 @@ func (s *Scanner) Scan(ctx context.Context, req Request) (*model.ScanSummary, er
 
 	controller := performance.NewController(performance.Limits{
 		BaseQPS:          s.config().Performance.MaxMetadataQPS,
+		Mode:             s.config().Performance.ControlMode,
+		Impact:           s.config().Performance.Impact,
+		WorkerLimit:      s.config().Performance.Concurrency.Limit(),
+		DeviceSource:     mountinfo.Source(rootPath),
+		StartQPS:         s.config().Performance.StartQPS(),
 		MinQPS:           s.config().Performance.MinMetadataQPS,
 		MaxCPUPercent:    s.config().Performance.MaxCPUPercent,
 		MemoryLimit:      s.config().Performance.MemoryLimit.Resolve(),
@@ -878,6 +888,9 @@ func (s *Scanner) monitorControl(ctx context.Context, run *model.Run, control *s
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if worker := controller.RecommendedWorkers(); worker != concurrency.Limit() {
+				concurrency.SetLimit(worker)
+			}
 			if source != "" {
 				if info, statErr := os.Stat(source); statErr == nil &&
 					(!info.ModTime().Equal(configMod) || info.Size() != configSize) {
@@ -949,6 +962,11 @@ func (s *Scanner) reloadConfig(run *model.Run, controller *performance.Controlle
 	}
 	controller.UpdateLimits(performance.Limits{
 		BaseQPS:          cfg.Performance.MaxMetadataQPS,
+		Mode:             cfg.Performance.ControlMode,
+		Impact:           cfg.Performance.Impact,
+		WorkerLimit:      cfg.Performance.Concurrency.Limit(),
+		DeviceSource:     mountinfo.Source(run.RootPath),
+		StartQPS:         cfg.Performance.StartQPS(),
 		MinQPS:           cfg.Performance.MinMetadataQPS,
 		MaxCPUPercent:    cfg.Performance.MaxCPUPercent,
 		MemoryLimit:      cfg.Performance.MemoryLimit.Resolve(),

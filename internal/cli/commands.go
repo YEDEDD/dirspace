@@ -23,7 +23,7 @@ import (
 )
 
 // Version is overridden with -ldflags at release time.
-var Version = "1.15.9"
+var Version = "1.16.0"
 
 const (
 	exitOK      = 0
@@ -705,13 +705,7 @@ func setLowPriority(cfg *config.Config, log interface {
 }
 
 func buildConfigJSON(cfg *config.Config) map[string]any {
-	startQPS := cfg.Performance.MaxMetadataQPS
-	if cfg.Performance.AdaptiveThrottle && startQPS >= 10 {
-		startQPS /= 3
-		if startQPS < cfg.Performance.MinMetadataQPS {
-			startQPS = cfg.Performance.MinMetadataQPS
-		}
-	}
+	startQPS := cfg.Performance.StartQPS()
 	return map[string]any{
 		"source":                 cfg.Source,
 		"profile":                cfg.Profile,
@@ -732,6 +726,8 @@ func buildConfigJSON(cfg *config.Config) map[string]any {
 		"concurrency_max":        cfg.Performance.Concurrency.Limit(),
 		"max_metadata_qps":       cfg.Performance.MaxMetadataQPS,
 		"start_metadata_qps":     startQPS,
+		"control_mode":           cfg.Performance.ControlMode,
+		"impact":                 cfg.Performance.Impact,
 		"min_metadata_qps":       cfg.Performance.MinMetadataQPS,
 		"max_cpu_percent":        cfg.Performance.MaxCPUPercent,
 		"memory_limit":           cfg.Performance.MemoryLimit.Resolve(),
@@ -778,8 +774,9 @@ func printConfig(w io.Writer, cfg *config.Config) {
 	fmt.Fprintf(w, "历史保留：%d 天；已删除目录保留：%d 天\n",
 		cfg.Database.RetentionDays, cfg.Database.StaleRetentionDays)
 	fmt.Fprintf(w, "并发：%s（一级目录间并行；大目录内部使用剩余并发）\n", cfg.Performance.Concurrency)
-	fmt.Fprintf(w, "QPS：%d（自适应，起步约 %d）\n", cfg.Performance.MaxMetadataQPS, startQPS(cfg))
-	fmt.Fprintf(w, "CPU：%d%%；内存：%s（%s）\n", cfg.Performance.MaxCPUPercent,
+	fmt.Fprintf(w, "QPS：%d（自适应，起步约 %d）；控制模式：%s；业务影响：%s\n",
+		cfg.Performance.MaxMetadataQPS, startQPS(cfg), cfg.Performance.ControlMode, cfg.Performance.Impact)
+	fmt.Fprintf(w, "CPU：%d%%（整机）；内存：%s（%s）\n", cfg.Performance.MaxCPUPercent,
 		config.FormatBytes(cfg.Performance.MemoryLimit.Resolve()), cfg.Performance.MemoryLimit.String())
 	fmt.Fprintf(w, "主机保护：CPU %g%%，Load1 %g（0 表示关闭）\n",
 		cfg.Performance.MaxHostCPUPercent, cfg.Performance.MaxLoad1)
@@ -827,14 +824,7 @@ func formatInterval(d time.Duration) string {
 }
 
 func startQPS(cfg *config.Config) int {
-	qps := cfg.Performance.MaxMetadataQPS
-	if cfg.Performance.AdaptiveThrottle && qps >= 10 {
-		qps /= 3
-		if qps < cfg.Performance.MinMetadataQPS {
-			qps = cfg.Performance.MinMetadataQPS
-		}
-	}
-	return qps
+	return cfg.Performance.StartQPS()
 }
 
 func printHelp(w io.Writer) {

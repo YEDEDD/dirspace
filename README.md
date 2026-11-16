@@ -9,8 +9,8 @@ GitHub: <https://github.com/YEDEDD/dirspace>
 需要 Go 1.27+，也可以直接用 Release 中的 Linux 压缩包。
 
 ```bash
-tar xzf dirspace-1.15.9-linux-amd64.tar.gz
-cd dirspace-1.15.9-linux-amd64
+tar xzf dirspace-1.16.0-linux-amd64.tar.gz
+cd dirspace-1.16.0-linux-amd64
 sudo ./scripts/install.sh
 ```
 
@@ -98,7 +98,9 @@ profile 基线：
 
 慢元数据暂停阈值使用通用名 `slow_metadata_latency`、`pause_metadata_latency`、`pause_cooldown`；旧配置里的 `nfs_slow_latency`、`nfs_pause_latency`、`nfs_pause_cooldown` 仍然兼容。
 
-`concurrency: auto` 的 worker 池会预留到上限，由共享信号量限制实际总并发。QPS 从上限约 1/3 起步，压力正常时逐步升高。`memory_limit: auto` 优先取 cgroup 上限的 80%，否则取物理内存 10%，范围 256MB–4GB。
+`concurrency: auto` 的 worker 池会预留到上限，由共享信号量限制实际总并发。QPS 起步和升降由 `control_mode`、`impact` 决定：`observe` 保持原约 1/3 起步且只记录；`safe` 按 impact 起步，只降不升；`auto` 允许在压力恢复后升速。`memory_limit: auto` 优先取 cgroup 上限的 80%，否则取物理内存 10%，范围 256MB–4GB。
+
+默认 `control_mode: safe`、`impact: balanced`。生产可先把 `control_mode` 设为 `observe` 观察一轮，再切到 `safe`；维护窗口才使用 `auto` + `impact: fast`。
 
 ### 运行中热更新
 
@@ -106,7 +108,9 @@ profile 基线：
 
 - `max_metadata_qps`、`min_metadata_qps`
 - `concurrency`：调大立即增加可用并发；调小后新任务等当前元数据调用结束再受限，不中断已发出的 `lstat/readdir`
-- `max_cpu_percent`、`max_host_cpu_percent`、`max_load1`
+- `control_mode`：`observe` 只记录、`safe` 只降速/暂停、`auto` 允许升速
+- `impact`：`low` / `balanced` / `fast`，是业务影响策略，不是 QPS
+- `max_cpu_percent`（整机百分比）、`max_host_cpu_percent`、`max_load1`
 - `slow_metadata_latency`、`pause_metadata_latency`、`pause_cooldown`
 - `max_metadata_errors`、`memory_limit`
 

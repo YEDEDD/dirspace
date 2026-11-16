@@ -327,7 +327,7 @@ func TestAssessMonitorFlagsLowAndHigh(t *testing.T) {
 	low := assessMonitor(monitorReport{
 		Config: monitorConfig{MaxCPUPercent: 20, MaxMetadataQPS: 300},
 		Runtime: monitorRuntime{
-			Active: true, ProcessCPUPercent: 19, QPS: 100, QPSLimit: 300,
+			Active: true, ProcessCPUPercent: 800, QPS: 100, QPSLimit: 300,
 			HostCPUPercent: 20,
 		},
 	})
