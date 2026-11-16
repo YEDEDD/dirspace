@@ -822,6 +822,26 @@ func TestDiffComparesCompletedSnapshots(t *testing.T) {
 	}
 }
 
+func TestReconcileScheduleRunsQuickWhenDue(t *testing.T) {
+	f := newServiceFixture(t)
+	root := f.cfg.Scan.RootPath
+	mkFile(t, filepath.Join(root, "alpha", "a"), 1024)
+	if _, err := f.svc.Scan(context.Background(), root, ScanOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Add(25 * time.Hour)
+	due, active, _, err := f.svc.reconcileSchedule(context.Background(), []string{root}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active {
+		t.Fatal("unexpected active run")
+	}
+	if due == nil || due.mode != model.ModeQuick {
+		t.Fatalf("quick scan should be due: %+v", due)
+	}
+}
+
 func TestStatusIncludesNextScheduledScans(t *testing.T) {
 	f := newServiceFixture(t)
 	root := f.cfg.Scan.RootPath

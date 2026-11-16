@@ -35,6 +35,7 @@ func (s *Service) RunDaemon(ctx context.Context, opts DaemonOptions) error {
 		if err := sleepContext(ctx, s.Cfg.Scan.StartupDelay.Duration); err != nil {
 			return nil
 		}
+		s.Log.Info("启动延迟结束")
 	}
 
 	if opts.Once {
@@ -189,7 +190,7 @@ func (s *Service) reconcileSchedule(ctx context.Context, roots []string, now tim
 				active = true
 			}
 		}
-		sc := s.nextSchedule(ctx, root)
+		sc := s.nextScheduleAt(ctx, root, now)
 		if !sc.exact.After(now) && exactRoot == "" {
 			exactRoot = root
 		}
@@ -262,8 +263,15 @@ type scanSchedule struct {
 }
 
 func (s *Service) nextSchedule(ctx context.Context, rootPath string) scanSchedule {
+	return s.nextScheduleAt(ctx, rootPath, time.Now())
+}
+
+// nextScheduleAt is nextSchedule with an explicit clock. Callers that already
+// captured "now" must use the same instant for due comparisons; otherwise a
+// schedule computed a few microseconds later looks like it is still in the
+// future and the daemon wakes forever without ever running the quick scan.
+func (s *Service) nextScheduleAt(ctx context.Context, rootPath string, now time.Time) scanSchedule {
 	var sc scanSchedule
-	now := time.Now()
 	root, err := s.Store.GetRoot(ctx, rootPath)
 	if err != nil {
 		if !errors.Is(err, storage.ErrNotFound) {
@@ -350,6 +358,12 @@ func (s *Service) nextSchedule(ctx context.Context, rootPath string) scanSchedul
 func sleepContext(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return ctx.Err()
+	}
+	// A daemon must never sleep through a due quick scan. Cap every wait at
+	// the idle poll interval, even if a caller computes a much larger
+	// duration from a distant schedule.
+	if d > daemonIdlePoll {
+		d = daemonIdlePoll
 	}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
