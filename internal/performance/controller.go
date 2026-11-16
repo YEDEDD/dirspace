@@ -334,6 +334,11 @@ func (c *Controller) sample(sampler *hostSampler) {
 				capacity = float64(limits.BaseQPS)
 			}
 			ratio := impactRatio(c.impact)
+			if c.mode == ControlSafe {
+				// Safe starts at the configured cap and only lowers to the
+				// measured capacity; it never applies the auto impact fraction.
+				ratio = 1
+			}
 			c.targetQPS = capacity * ratio
 			if c.targetQPS < float64(limits.MinQPS) {
 				c.targetQPS = float64(limits.MinQPS)

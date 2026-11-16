@@ -45,16 +45,17 @@ func TestStartQPSUsesModeAndImpact(t *testing.T) {
 	cfg.Performance.AdaptiveThrottle = true
 	cfg.Performance.ControlMode = "safe"
 	cfg.Performance.Impact = "balanced"
-	if got := cfg.Performance.StartQPS(); got != 500 {
-		t.Fatalf("safe balanced start=%d, want 500", got)
+	if got := cfg.Performance.StartQPS(); got != 1000 {
+		t.Fatalf("safe start=%d, want 1000", got)
 	}
+	cfg.Performance.ControlMode = "auto"
 	cfg.Performance.Impact = "low"
 	if got := cfg.Performance.StartQPS(); got != 200 {
-		t.Fatalf("safe low start=%d, want 200", got)
+		t.Fatalf("auto low start=%d, want 200", got)
 	}
 	cfg.Performance.Impact = "fast"
 	if got := cfg.Performance.StartQPS(); got != 800 {
-		t.Fatalf("safe fast start=%d, want 800", got)
+		t.Fatalf("auto fast start=%d, want 800", got)
 	}
 	cfg.Performance.ControlMode = "observe"
 	if got := cfg.Performance.StartQPS(); got != 333 {

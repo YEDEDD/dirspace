@@ -404,7 +404,12 @@ func (p PerformanceConfig) StartQPS() int {
 		return qps
 	}
 	mode := p.ControlMode
-	if mode == "" || mode == "safe" || mode == "auto" {
+	switch mode {
+	case "", "safe":
+		// Safe starts at the operator's cap and may only lower it. Starting at
+		// an impact fraction would make the first safe scan needlessly slower
+		// than the previous configuration.
+	case "auto":
 		ratio := 0.5
 		switch p.Impact {
 		case "low":
@@ -413,7 +418,7 @@ func (p PerformanceConfig) StartQPS() int {
 			ratio = 0.8
 		}
 		qps = int(float64(qps) * ratio)
-	} else {
+	default:
 		qps /= 3
 	}
 	if qps < p.MinMetadataQPS {
